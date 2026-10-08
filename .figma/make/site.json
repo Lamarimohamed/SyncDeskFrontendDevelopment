@@ -1,0 +1,10 @@
+{
+  "description": "Manage business data seamlessly with an offline-first workspace that synchronizes changes reliably, ideal for retail systems in low-infrastructure markets.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

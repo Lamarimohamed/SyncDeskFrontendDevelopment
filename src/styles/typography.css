@@ -1,0 +1,62 @@
+@utility type-display {
+  font-size: 40px;
+  line-height: 48px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+@utility type-h1 {
+  font-size: 24px;
+  line-height: 32px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+@utility type-h2 {
+  font-size: 18px;
+  line-height: 28px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+@utility type-h3 {
+  font-size: 15px;
+  line-height: 24px;
+  font-weight: 600;
+}
+@utility type-body-lg {
+  font-size: 16px;
+  line-height: 24px;
+}
+@utility type-body {
+  font-size: 14px;
+  line-height: 20px;
+}
+@utility type-body-sm {
+  font-size: 13px;
+  line-height: 18px;
+}
+@utility type-label {
+  font-size: 13px;
+  line-height: 16px;
+  font-weight: 500;
+}
+@utility type-caption {
+  font-size: 12px;
+  line-height: 16px;
+}
+@utility type-table-head {
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+@utility type-button {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+}
+@utility type-metric {
+  font-size: 28px;
+  line-height: 32px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}

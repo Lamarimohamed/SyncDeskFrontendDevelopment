@@ -1,0 +1,6 @@
+export { SettingsLayout } from './SettingsLayout'
+export { ProfileSettings } from './ProfileSettings'
+export { WorkspaceSettings } from './WorkspaceSettings'
+export { SynchronizationSettings } from './SynchronizationSettings'
+export { ConnectivitySettings } from './ConnectivitySettings'
+export { AppearanceSettings } from './AppearanceSettings'
