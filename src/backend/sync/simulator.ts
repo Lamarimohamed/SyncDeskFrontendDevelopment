@@ -28,6 +28,7 @@ export interface NetworkFaults {
 
 export interface SimulatorReport<T extends string> {
   seed: number
+  virtualTimeMs: number
 
   replicaIds: string[]
 
@@ -250,6 +251,7 @@ export class ReplicaSimulator<T extends string> {
   report(seed: number): SimulatorReport<T> {
     return {
       seed,
+      virtualTimeMs: this.virtualTime,
 
       replicaIds: this.replicaIds,
 

@@ -35,6 +35,8 @@ export interface ExperimentResult<T extends string> {
 
   retryPayloadBytes: number
 
+  virtualTimeMs: number | null
+
   converged: boolean
 
   stateHashes: Record<string, string>
@@ -191,6 +193,8 @@ export const runExperiment = <T extends string,>(
 
       retryPayloadBytes: 0,
 
+      virtualTimeMs: report.virtualTimeMs,
+
       converged: report.converged,
 
       stateHashes,
@@ -224,6 +228,8 @@ export const runExperiment = <T extends string,>(
       acknowledgementBytes: 0,
 
       retryPayloadBytes: 0,
+
+      virtualTimeMs: null,
 
       converged: false,
 
