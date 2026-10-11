@@ -79,3 +79,28 @@ The runner does not claim crash durability, exactly-once network delivery, secur
 or performance superiority. Results are only comparable when the workload and fault
 configuration have the same semantics. No delta synchronization, tombstone
 garbage collection, or production transport is included.
+
+## Pilot executed on 2026-10-11
+
+A functional pilot was executed with the matrix runner using seeds `11`, `23`, and
+`37`, five scenarios, three CRDT runs and three client-server LWW records per
+scenario. Raw records, configuration, and the derived summary are preserved under
+`.tmp/pilot-20261011/`:
+
+- `raw.jsonl`: 30 raw records (15 CRDT and 15 baseline records).
+- `config.json`: seed and system configuration.
+- `summary.json`: grouped descriptive statistics.
+
+Observed pilot outcomes were limited to functional correctness, not performance
+claims. Stable connectivity, offline reconnect, and deterministic delayed-ordering
+CRDT runs converged in all three seeds. The short-partition proxy had zero of three
+CRDT runs converge, with two intentionally dropped messages per run. The
+long-partition/concurrent proxy also had zero of three CRDT runs converge, with six
+dropped messages per run. Baseline records were authoritative by construction and
+therefore report convergence separately from CRDT replica convergence.
+
+The current baseline has no implemented application transport, so its encoded
+payload, acknowledgement, retry, and total synchronization byte fields are null,
+not zero. No network performance comparison or statistical superiority claim is
+made. The pilot is reproducible with the temporary Vitest harness used to invoke
+`runComparisonMatrix`; production CLI invocation remains a future improvement.
