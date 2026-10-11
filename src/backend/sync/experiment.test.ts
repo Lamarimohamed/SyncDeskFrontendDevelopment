@@ -33,5 +33,20 @@ describe("experiment runner", () => {
     expect(first.encodedPayloadBytes).toBeGreaterThan(0)
 
     expect(Object.values(first.stateHashes).length).toBe(3)
+    expect(first.acknowledgementBytes).toBe(0)
+    expect(first.retryPayloadBytes).toBe(0)
+  })
+
+  it("retains failed configuration and error details", () => {
+    const result = runExperiment<string>({
+      scenarioId: "invalid-workload",
+      seed: 3,
+      operationsPerReplica: -1,
+    })
+
+    expect(result.failed).toBe(true)
+    expect(result.scenarioId).toBe("invalid-workload")
+    expect(result.seed).toBe(3)
+    expect(result.error).toContain("Invalid experiment configuration")
   })
 })

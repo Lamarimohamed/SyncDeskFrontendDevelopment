@@ -31,6 +31,10 @@ export interface ExperimentResult<T extends string> {
 
   encodedPayloadBytes: number
 
+  acknowledgementBytes: number
+
+  retryPayloadBytes: number
+
   converged: boolean
 
   stateHashes: Record<string, string>
@@ -38,6 +42,8 @@ export interface ExperimentResult<T extends string> {
   stateSizes: Record<string, number>
 
   metadataSizes: Record<string, number>
+
+  tombstoneSizes: Record<string, number>
 
   events: ReturnType<ReplicaSimulator<T>["report"]>["events"]
 
@@ -47,7 +53,26 @@ export interface ExperimentResult<T extends string> {
 }
 
 const hash = (value: unknown): string =>
-  createHash("sha256").update(JSON.stringify(value)).digest("hex")
+  createHash("sha256")
+    .update(JSON.stringify(canonicalize(value)))
+    .digest("hex")
+
+const utf8Bytes = (value: unknown): number =>
+  new TextEncoder().encode(JSON.stringify(canonicalize(value))).byteLength
+
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value))
+    return value
+      .map(canonicalize)
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, entry]) => [key, canonicalize(entry)]),
+    )
+  return value
+}
 
 export const runExperiment = <T extends string,>(
   config: ExperimentConfig,
@@ -55,7 +80,6 @@ export const runExperiment = <T extends string,>(
   const replicaIds = config.replicaIds ?? ["r1", "r2", "r3", "r4"]
 
   const operationsPerReplica = config.operationsPerReplica ?? 2
-
   const simulator = new ReplicaSimulator<T>(config.seed, replicaIds)
 
   let operationCount = 0
@@ -67,6 +91,12 @@ export const runExperiment = <T extends string,>(
   let encodedPayloadBytes = 0
 
   try {
+    if (
+      !config.scenarioId ||
+      !Number.isInteger(config.seed) ||
+      operationsPerReplica < 0
+    )
+      throw new Error("Invalid experiment configuration")
     for (const replicaId of replicaIds) {
       for (let index = 0; index < operationsPerReplica; index += 1) {
         simulator.update(replicaId, (replica) => {
@@ -114,22 +144,32 @@ export const runExperiment = <T extends string,>(
     const report = simulator.report(config.seed)
 
     const stateHashes = Object.fromEntries(
-      replicaIds.map((id) => [id, hash(report.snapshots[id])]),
+      replicaIds.map((id) => [
+        id,
+        hash({
+          register: report.snapshots[id].register,
+          set: report.snapshots[id].set,
+          counter: report.snapshots[id].counter,
+        }),
+      ]),
     )
 
     const stateSizes = Object.fromEntries(
-      replicaIds.map((id) => [id, JSON.stringify(report.snapshots[id]).length]),
+      replicaIds.map((id) => [id, utf8Bytes(report.snapshots[id])]),
     )
 
     const metadataSizes = Object.fromEntries(
       replicaIds.map((id) => [
         id,
-
-        report.snapshots[id].set.adds
-          ? Object.values(report.snapshots[id].set.adds).flat().length +
-            Object.values(report.snapshots[id].set.removes).flat().length
-          : 0,
+        utf8Bytes({
+          adds: report.snapshots[id].set.adds,
+          removes: report.snapshots[id].set.removes,
+        }),
       ]),
+    )
+
+    const tombstoneSizes = Object.fromEntries(
+      replicaIds.map((id) => [id, utf8Bytes(report.snapshots[id].set.removes)]),
     )
 
     return {
@@ -147,6 +187,10 @@ export const runExperiment = <T extends string,>(
 
       encodedPayloadBytes,
 
+      acknowledgementBytes: 0,
+
+      retryPayloadBytes: 0,
+
       converged: report.converged,
 
       stateHashes,
@@ -154,6 +198,8 @@ export const runExperiment = <T extends string,>(
       stateSizes,
 
       metadataSizes,
+
+      tombstoneSizes,
 
       events: report.events,
 
@@ -175,6 +221,10 @@ export const runExperiment = <T extends string,>(
 
       encodedPayloadBytes,
 
+      acknowledgementBytes: 0,
+
+      retryPayloadBytes: 0,
+
       converged: false,
 
       stateHashes: {},
@@ -182,6 +232,8 @@ export const runExperiment = <T extends string,>(
       stateSizes: {},
 
       metadataSizes: {},
+
+      tombstoneSizes: {},
 
       events: simulator.report(config.seed).events,
 
