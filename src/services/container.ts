@@ -7,15 +7,18 @@ import { SyncEngine } from './sync/SyncEngine'
 import { MockRepository } from '@/repositories/MockRepository'
 import type { Repository } from '@/repositories/Repository'
 import { SyncService } from './syncService'
+import { BackendApiClient } from './backendApi'
 
 const storage = browserStorage('local')
 const seed = buildSeed(Date.now())
+const backendClient = env.backendUrl ? new BackendApiClient(env.backendUrl) : undefined
 
 const engine = new SyncEngine({
   storage,
   seedActivity: seed.activity,
   seedLastSyncAt: seed.lastSyncAt,
   isAutoSyncEnabled: () => preferencesStore.get().autoSync,
+  backendClient,
 })
 
 const mockRepository = new MockRepository(engine, storage, seed, { latencyMs: env.isTest ? 0 : 300 })

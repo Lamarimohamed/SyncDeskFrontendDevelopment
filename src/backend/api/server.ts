@@ -20,6 +20,7 @@ export interface BackendServerOptions {
   replicaId?: string
   store?: ReplicaStoreLike
   bodyLimitBytes?: number
+  corsOrigin?: string
 }
 
 export interface BackendServer {
@@ -54,6 +55,12 @@ const json = (response: ServerResponse, status: number, body: unknown): void => 
     "content-length": Buffer.byteLength(encoded),
   })
   response.end(encoded)
+}
+
+const corsHeaders = (response: ServerResponse, origin: string): void => {
+  response.setHeader('access-control-allow-origin', origin)
+  response.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS')
+  response.setHeader('access-control-allow-headers', 'content-type')
 }
 
 const errorResponse = (
@@ -158,6 +165,7 @@ export const createBackendServer = (
 
   let endpoint = loadEndpoint(replicaId, store)
   let requestChain = Promise.resolve()
+  const corsOrigin = options.corsOrigin ?? process.env.BACKEND_CORS_ORIGIN ?? '*'
 
   const persist = (candidate: ReliableSyncEndpoint<string>): ReplicaRecord => {
     try {
@@ -173,6 +181,13 @@ export const createBackendServer = (
   const handler = (request: IncomingMessage, response: ServerResponse): void => {
     const method = request.method ?? "GET"
     const path = (request.url ?? "").split("?", 1)[0]
+    corsHeaders(response, corsOrigin)
+
+    if (method === 'OPTIONS') {
+      response.writeHead(204)
+      response.end()
+      return
+    }
 
     if (method === "GET" && path === "/health") {
       json(response, 200, { status: "ok", apiVersion: API_VERSION })

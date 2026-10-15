@@ -4,6 +4,13 @@ This is a backend-only HTTP server for the existing generic CRDT replica
 implementation. It does not connect to the React frontend, expose retail
 product endpoints, or provide peer-to-peer replication.
 
+The frontend integration is opt-in through `VITE_BACKEND_URL`. When configured,
+the browser keeps its existing local repository and offline queue, then sends
+completed pending batches to `POST /v1/sync/messages`. The batch is represented
+as a generic CRDT OR-Set and PN-Counter envelope; it is not a product/category/
+stock domain mapping. Product CRUD remains local to the frontend in this
+milestone.
+
 ## Start
 
 The server entry point is `src/backend/api/server.ts`. It assumes Node.js 24 or
@@ -25,6 +32,8 @@ Environment variables:
 - `BACKEND_STORE_PATH` is optional. When it is a non-empty path, the standalone
   server uses the existing file-backed replica store. When unset or blank, the
   server uses in-memory storage and all state is lost on process exit.
+- `BACKEND_CORS_ORIGIN` defaults to `*` for local development. Set it to the
+  exact frontend origin when a restricted deployment is required.
 
 Example with file-backed state:
 
@@ -154,6 +163,9 @@ Current status codes:
 - `503` valid synchronization message could not be persisted.
 - `404` unknown route.
 - `413` request body exceeds the 1 MiB default limit.
+
+`OPTIONS` requests receive a `204` response for browser preflight. The server
+allows `GET`, `POST`, and `content-type` from the configured CORS origin.
 - `500` unexpected processing failure.
 
 Persistence failures use this stable response and do not expose the underlying
@@ -202,3 +214,24 @@ after each case. They use isolated in-memory server state.
 - In-memory state is lost when the process exits.
 - File-backed state can be selected by backend composition code, but
   cross-process safety and crash durability are not claimed.
+
+## Frontend development
+
+Start the backend first:
+
+```powershell
+$env:BACKEND_STORE_PATH = "$PWD\.tmp\backend-replicas.json"
+node --experimental-transform-types --loader ./src/backend/api/ts-loader.mjs src/backend/api/server.ts
+```
+
+Then start Vite with the backend URL:
+
+```powershell
+$env:VITE_BACKEND_URL = "http://127.0.0.1:8787"
+npm run dev
+```
+
+If `VITE_BACKEND_URL` is unset, the frontend retains its existing local-only
+simulated synchronization behavior. If the backend becomes unavailable during
+a configured sync, the local pending changes remain pending/failed and the UI
+shows the synchronization error; they are not discarded.

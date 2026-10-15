@@ -10,6 +10,7 @@ import type {
 import { nextId } from '@/lib/ids'
 import { logger } from '@/lib/logger'
 import { readJson, writeJson, type KeyValueStorage } from '@/lib/storage'
+import type { BackendApiClient } from '@/services/backendApi'
 
 /**
  * Frontend simulation of the synchronization layer. It models connectivity,
@@ -29,6 +30,7 @@ export interface SyncEngineOptions {
   isAutoSyncEnabled?: () => boolean
   seedActivity?: ActivityEvent[]
   seedLastSyncAt?: number | null
+  backendClient?: BackendApiClient
 }
 
 type MergeHandler = (change: RemoteChange) => void
@@ -53,8 +55,9 @@ const MERGE_RULE = 'Last-writer-wins register: the value with the later timestam
 export class SyncEngine {
   readonly replicaId: string
   readonly deviceId: string
-  private readonly opts: Required<Omit<SyncEngineOptions, 'storage' | 'seedActivity' | 'seedLastSyncAt'>> & {
+  private readonly opts: Required<Omit<SyncEngineOptions, 'storage' | 'seedActivity' | 'seedLastSyncAt' | 'backendClient'>> & {
     storage: KeyValueStorage
+    backendClient?: BackendApiClient
   }
   private snapshot: SyncSnapshot
   private remote: RemoteChange[]
@@ -76,6 +79,7 @@ export class SyncEngine {
       autoSyncDelayMs: options.autoSyncDelayMs ?? 1500,
       now: options.now ?? Date.now,
       isAutoSyncEnabled: options.isAutoSyncEnabled ?? (() => true),
+      backendClient: options.backendClient,
     }
     const saved = readJson<Persisted | null>(options.storage, STORAGE_KEY, null)
     this.remote = saved?.remote ?? []
@@ -223,10 +227,10 @@ export class SyncEngine {
       lastError: null,
       pending: this.snapshot.pending.map((p) => ({ ...p, status: 'syncing' })),
     })
-    this.later(this.opts.syncMs, () => this.finishSync())
+    this.later(this.opts.syncMs, () => void this.finishSync())
   }
 
-  private finishSync(): void {
+  private async finishSync(): Promise<void> {
     if (this.snapshot.connectivity !== 'online') return
     if (this.failNextSync) {
       this.failNextSync = false
@@ -243,6 +247,22 @@ export class SyncEngine {
 
     const inbox = this.remote
     const local = this.snapshot.pending.filter((p) => this.inFlight.has(p.id))
+    if (this.opts.backendClient && local.length > 0) {
+      try {
+        await this.opts.backendClient.syncChanges(this.replicaId, local)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'The backend synchronization failed.'
+        this.log('sync-failed', 'Backend synchronization failed', message)
+        this.update({
+          phase: 'error',
+          lastError: message,
+          pending: this.snapshot.pending.map((p) =>
+            this.inFlight.has(p.id) ? { ...p, status: 'failed', attempts: p.attempts + 1 } : p,
+          ),
+        })
+        return
+      }
+    }
     const rest = this.snapshot.pending.filter((p) => !this.inFlight.has(p.id)).map((p) => ({ ...p, status: 'pending' as const }))
     const received = inbox.length
     const receivedBytes = STATE_RECEIVED_BASE_BYTES + received * 120
