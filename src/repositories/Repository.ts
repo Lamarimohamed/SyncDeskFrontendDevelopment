@@ -10,6 +10,7 @@ import type {
   StockRow,
 } from '@/domain/types'
 import type { SyncSnapshot } from '@/domain/sync'
+import type { RetailCatalog } from '@/domain/retailSync'
 
 export interface ReplicaStats {
   /** Serialized size of the local data set, measured. */
@@ -49,4 +50,5 @@ export interface Repository {
   getReplicaStats(): Promise<ReplicaStats>
 
   discardPendingChange(id: string): Promise<void>
+  hydrateCatalog(catalog: RetailCatalog): Promise<void>
 }

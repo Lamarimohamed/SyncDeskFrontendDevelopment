@@ -1,6 +1,7 @@
 import { ReplicaRuntime } from '@/backend/crdt/replica'
 import { createStateMessage, encodeSyncMessage, type StateSyncMessage } from '@/backend/sync/protocol'
 import type { PendingChange } from '@/domain/sync'
+import type { RetailCatalog, RetailOperation, RetailOperationResult } from '@/domain/retailSync'
 
 export interface BackendHealth {
   status: 'ok'
@@ -25,6 +26,12 @@ export interface BackendSyncResponse {
   persistedAt: number
 }
 
+export interface BackendRetailResponse {
+  results: RetailOperationResult[]
+  catalog: RetailCatalog
+  persistedAt: number
+}
+
 export class BackendApiError extends Error {
   constructor(
     readonly status: number,
@@ -37,6 +44,47 @@ export class BackendApiError extends Error {
 }
 
 const normalizeBaseUrl = (baseUrl: string): string => baseUrl.replace(/\/+$/, '')
+
+const isProduct = (value: unknown): value is RetailCatalog['products'][number] => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const product = value as Record<string, unknown>
+  return (
+    typeof product.id === 'string' &&
+    typeof product.name === 'string' &&
+    typeof product.nameAr === 'string' &&
+    typeof product.description === 'string' &&
+    typeof product.descriptionAr === 'string' &&
+    typeof product.price === 'number' &&
+    typeof product.categoryId === 'string' &&
+    (product.availability === 'available' || product.availability === 'unavailable') &&
+    Number.isInteger(product.stock) &&
+    Number.isInteger(product.lowStockThreshold) &&
+    typeof product.updatedAt === 'number'
+  )
+}
+
+const isCategory = (value: unknown): value is RetailCatalog['categories'][number] => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const category = value as Record<string, unknown>
+  return (
+    typeof category.id === 'string' &&
+    typeof category.name === 'string' &&
+    typeof category.nameAr === 'string' &&
+    typeof category.description === 'string' &&
+    typeof category.updatedAt === 'number'
+  )
+}
+
+const validateCatalog = (value: unknown): RetailCatalog => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new BackendApiError(200, 'invalid_backend_response', 'The backend returned an invalid catalog.')
+  }
+  const catalog = value as { products?: unknown; categories?: unknown }
+  if (!Array.isArray(catalog.products) || !catalog.products.every(isProduct) || !Array.isArray(catalog.categories) || !catalog.categories.every(isCategory)) {
+    throw new BackendApiError(200, 'invalid_backend_response', 'The backend returned an invalid catalog.')
+  }
+  return { products: catalog.products, categories: catalog.categories }
+}
 
 export class BackendApiClient {
   private readonly baseUrl: string
@@ -58,6 +106,8 @@ export class BackendApiClient {
     replicaId: string,
     changes: readonly PendingChange[],
   ): Promise<BackendSyncResponse> {
+    const retailOperations = changes.flatMap((change) => change.retailOperation ? [change.retailOperation] : [])
+    if (retailOperations.length > 0) await this.syncRetailOperations(retailOperations)
     const replica = new ReplicaRuntime<string>(replicaId)
     for (const change of changes) {
       replica.add(`${change.kind}:${change.entityId}:${change.id}`)
@@ -69,6 +119,19 @@ export class BackendApiClient {
     return this.request<BackendSyncResponse>('/v1/sync/messages', {
       method: 'POST',
       body: JSON.stringify(message),
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+
+  async getRetailCatalog(): Promise<RetailCatalog> {
+    const response = await this.request<{ catalog: RetailCatalog }>('/v1/retail/catalog')
+    return validateCatalog(response.catalog)
+  }
+
+  async syncRetailOperations(operations: readonly RetailOperation[]): Promise<BackendRetailResponse> {
+    return this.request<BackendRetailResponse>('/v1/retail/operations', {
+      method: 'POST',
+      body: JSON.stringify({ operations }),
       headers: { 'content-type': 'application/json' },
     })
   }

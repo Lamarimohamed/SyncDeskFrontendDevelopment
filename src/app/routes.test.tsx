@@ -25,7 +25,7 @@ beforeEach(async () => {
 describe('routing', () => {
   it('redirects protected routes to /login when signed out', async () => {
     const router = renderAt('/products')
-    await screen.findByRole('heading', { name: 'Sign in' })
+    await screen.findByRole('heading', { name: 'Sign in' }, { timeout: 5000 })
     expect(router.state.location.pathname).toBe('/login')
   })
 

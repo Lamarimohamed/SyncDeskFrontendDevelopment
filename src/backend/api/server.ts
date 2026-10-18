@@ -5,6 +5,7 @@ import { resolve } from "node:path"
 import { ReplicaRuntime, type ReplicaSnapshot } from "../crdt/replica"
 import { FileReplicaStore, ReplicaStore, type ReplicaRecord } from "../persistence/ReplicaStore"
 import { ReliableSyncEndpoint } from "../sync/reliability"
+import { loadRetailRuntime, RetailDomainRuntime, validateRetailOperation } from "./retail"
 
 const API_VERSION = "1"
 const MAX_BODY_BYTES = 1024 * 1024
@@ -164,6 +165,7 @@ export const createBackendServer = (
     throw new Error("Request body limit must be a positive integer")
 
   let endpoint = loadEndpoint(replicaId, store)
+  let retailRuntime = loadRetailRuntime(replicaId, store)
   let requestChain = Promise.resolve()
   const corsOrigin = options.corsOrigin ?? process.env.BACKEND_CORS_ORIGIN ?? '*'
 
@@ -173,6 +175,14 @@ export const createBackendServer = (
         snapshot: candidate.replica.snapshot(),
         appliedMessageIds: candidate.appliedMessageIdSnapshot(),
       } satisfies PersistedReplica)
+    } catch {
+      throw new PersistenceError()
+    }
+  }
+
+  const persistRetail = (candidate: RetailDomainRuntime): ReplicaRecord => {
+    try {
+      return store.save(`${replicaId}:retail`, candidate.snapshot())
     } catch {
       throw new PersistenceError()
     }
@@ -202,6 +212,49 @@ export const createBackendServer = (
         persisted: Boolean(record),
         updatedAt: record?.updatedAt ?? null,
       })
+      return
+    }
+
+    if (method === "GET" && path === "/v1/retail/catalog") {
+      json(response, 200, {
+        catalog: retailRuntime.getCatalog(),
+        replicaId,
+      })
+      return
+    }
+
+    if (method === "POST" && path === "/v1/retail/operations") {
+      requestChain = requestChain
+        .then(async () => {
+          const body = await readJson(request, bodyLimit)
+          if (!isRecord(body) || !Array.isArray(body.operations) || body.operations.length === 0) {
+            throw new HttpError(400, "invalid_retail_operations", "Retail operations must be a non-empty array")
+          }
+          const candidate = new RetailDomainRuntime(
+            ReplicaRuntime.fromJSON(retailRuntime.replica.snapshot()),
+            retailRuntime.getCatalog(),
+            retailRuntime.appliedIds(),
+          )
+          const results = body.operations.map((operation) => candidate.apply(validateRetailOperation(operation)))
+          const record = persistRetail(candidate)
+          retailRuntime = candidate
+          json(response, 200, {
+            results,
+            catalog: candidate.getCatalog(),
+            persistedAt: record.updatedAt,
+          })
+        })
+        .catch((error: unknown) => {
+          if (error instanceof HttpError) {
+            errorResponse(response, error.status, error.code, error.message)
+            return
+          }
+          if (error instanceof PersistenceError) {
+            errorResponse(response, 503, PERSISTENCE_FAILURE_RESPONSE.code, PERSISTENCE_FAILURE_RESPONSE.message)
+            return
+          }
+          errorResponse(response, 400, "invalid_retail_operation", "The retail operation is invalid")
+        })
       return
     }
 

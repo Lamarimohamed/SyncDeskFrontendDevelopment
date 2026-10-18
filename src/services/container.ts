@@ -8,6 +8,7 @@ import { MockRepository } from '@/repositories/MockRepository'
 import type { Repository } from '@/repositories/Repository'
 import { SyncService } from './syncService'
 import { BackendApiClient } from './backendApi'
+import { logger } from '@/lib/logger'
 
 const storage = browserStorage('local')
 const seed = buildSeed(Date.now())
@@ -33,3 +34,12 @@ export const authService = new LocalAuthService({
 })
 
 engine.start()
+
+if (backendClient) {
+  void backendClient
+    .getRetailCatalog()
+    .then((catalog) => mockRepository.hydrateCatalog(catalog))
+    .catch((error: unknown) => {
+      logger.warn('REPOSITORY', 'Catalog hydration unavailable', error instanceof Error ? error.message : 'The backend catalog could not be loaded.')
+    })
+}

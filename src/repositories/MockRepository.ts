@@ -1,6 +1,7 @@
 import { buildSeed, PEER_SEEDS, THIS_DEVICE_ID, type Seed } from '@/data/seed'
 import { stockLevel, adjustmentDelta, validateAdjustment, validateCategoryName, validateProduct } from '@/domain/rules'
 import type { ChangeDraft, RemoteChange, SyncSnapshot } from '@/domain/sync'
+import type { RetailCatalog } from '@/domain/retailSync'
 import {
   RepositoryError,
   ValidationError,
@@ -90,6 +91,47 @@ export class MockRepository implements Repository {
     this.commit()
   }
 
+  hydrateCatalog = (catalog: RetailCatalog) =>
+    this.write(() => {
+      const pendingProductIds = new Set(
+        this.engine.getSnapshot().pending
+          .filter((change) => change.entityType === 'product' || change.entityType === 'stock')
+          .map((change) => change.entityId),
+      )
+      const pendingCategoryIds = new Set(
+        this.engine.getSnapshot().pending.filter((change) => change.entityType === 'category').map((change) => change.entityId),
+      )
+      const remoteProductIds = new Set(catalog.products.map((product) => product.id))
+      const remoteCategoryIds = new Set(catalog.categories.map((category) => category.id))
+      const remotelyDeletedProductIds = this.data.products
+        .filter((product) => !pendingProductIds.has(product.id) && !remoteProductIds.has(product.id))
+        .map((product) => product.id)
+      this.data.tombstones = [...new Set([...this.data.tombstones, ...remotelyDeletedProductIds])]
+
+      this.data.products = [
+        ...this.data.products.filter((product) => pendingProductIds.has(product.id) || remoteProductIds.has(product.id)),
+        ...catalog.products.filter(
+          (product) => !pendingProductIds.has(product.id) && !this.data.products.some((local) => local.id === product.id),
+        ),
+      ]
+        .map((product) => {
+          if (pendingProductIds.has(product.id)) return product
+          return catalog.products.find((remote) => remote.id === product.id) ?? product
+        })
+        .filter((product) => pendingProductIds.has(product.id) || remoteProductIds.has(product.id))
+      this.data.tombstones = this.data.tombstones.filter((id) => !remoteProductIds.has(id))
+
+      this.data.categories = [
+        ...this.data.categories.filter((category) => pendingCategoryIds.has(category.id) || remoteCategoryIds.has(category.id)),
+        ...catalog.categories.filter(
+          (category) => !pendingCategoryIds.has(category.id) && !this.data.categories.some((local) => local.id === category.id),
+        ),
+      ].map((category) => {
+        if (pendingCategoryIds.has(category.id)) return category
+        return catalog.categories.find((remote) => remote.id === category.id) ?? category
+      })
+    })
+
   /* ----- products ----- */
 
   getProducts = () => this.read(() => this.data.products.map((p) => this.toRecord(p)))
@@ -114,6 +156,7 @@ export class MockRepository implements Repository {
         summary: 'Product created',
         crdt: 'OR-Set',
         discardable: false,
+        retailOperation: { operationId: nextId('retail'), kind: 'product.upsert', product },
       })
       return this.toRecord(product)
     })
@@ -125,6 +168,7 @@ export class MockRepository implements Repository {
       if (!current) throw new NotFoundError('This product')
       const label = input.name
       const updatedAt = this.now()
+      const next: Product = { ...current, ...input, stock: input.stock, updatedAt }
 
       if (input.price !== current.price) {
         this.enqueue({
@@ -138,6 +182,7 @@ export class MockRepository implements Repository {
           to: formatDA(input.price),
           crdt: 'LWW Register',
           discardable: true,
+          retailOperation: { operationId: nextId('retail'), kind: 'product.upsert', product: next },
         })
       }
 
@@ -154,12 +199,12 @@ export class MockRepository implements Repository {
           field: 'details',
           crdt: 'LWW Register',
           discardable: false,
+          retailOperation: { operationId: nextId('retail'), kind: 'product.upsert', product: next },
         })
       }
 
       if (input.stock !== current.stock) this.recordAdjustment(current, input.stock - current.stock, 'correct', 'correction', 'Edited in product form', input.stock)
 
-      const next: Product = { ...current, ...input, stock: input.stock, updatedAt }
       this.data.products = this.data.products.map((p) => (p.id === id ? next : p))
       return this.toRecord(next)
     })
@@ -178,6 +223,7 @@ export class MockRepository implements Repository {
         summary: 'Product deleted',
         crdt: 'OR-Set',
         discardable: false,
+        retailOperation: { operationId: nextId('retail'), kind: 'product.delete', productId: id },
       })
       return current
     })
@@ -200,6 +246,7 @@ export class MockRepository implements Repository {
           summary: 'Product restored',
           crdt: 'OR-Set',
           discardable: false,
+          retailOperation: { operationId: nextId('retail'), kind: 'product.upsert', product },
         })
       }
       return this.toRecord(product)
@@ -222,6 +269,7 @@ export class MockRepository implements Repository {
         summary: 'Category created',
         crdt: 'OR-Set',
         discardable: false,
+        retailOperation: { operationId: nextId('retail'), kind: 'category.upsert', category },
       })
       return this.toCategoryRecord(category)
     })
@@ -242,6 +290,7 @@ export class MockRepository implements Repository {
         field: 'details',
         crdt: 'LWW Register',
         discardable: false,
+        retailOperation: { operationId: nextId('retail'), kind: 'category.upsert', category: next },
       })
       return this.toCategoryRecord(next)
     })
@@ -264,6 +313,7 @@ export class MockRepository implements Repository {
         summary: 'Category deleted',
         crdt: 'OR-Set',
         discardable: false,
+        retailOperation: { operationId: nextId('retail'), kind: 'category.delete', categoryId: id },
       })
     })
 
