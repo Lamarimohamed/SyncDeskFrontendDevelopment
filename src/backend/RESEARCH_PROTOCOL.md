@@ -104,3 +104,69 @@ payload, acknowledgement, retry, and total synchronization byte fields are null,
 not zero. No network performance comparison or statistical superiority claim is
 made. The pilot is reproducible with the temporary Vitest harness used to invoke
 `runComparisonMatrix`; production CLI invocation remains a future improvement.
+
+## Retail simulator experiment harness
+
+The retail research matrix is implemented by
+`research/retailExperimentRunner.ts`. It evaluates only the existing retail
+simulator's `baseline` and `candidate` modes; it does not evaluate the generic
+client-server runner and does not change production retail behavior.
+
+`runRetailExperimentMatrix` expands scenario IDs and fixed seeds into explicit
+initial state, operations, replica origins, and delivery schedules, then replays
+the same scenario against both models. Supported scenarios include no-conflict,
+different-field, same-field, delete/update, delete/restore, duplicate/reordered
+delivery, three-replica partition/reconnection, category conflicts, and an
+inventory-delta exploratory case. Inventory convergence is reported separately
+from overselling or other business correctness.
+
+Each raw record contains the resolved scenario, workload and initial-state
+hashes, model, matrix and metric schema versions, convergence status, failure
+details, and simulator accounting. The retail simulator uses symmetric
+link-level partitions: `partition(A)` disconnects A from every other replica,
+while `partitionLink(A, B)` disconnects only the A/B link. Messages queued across
+a disconnected link remain pending; a delivery call records a blocked attempt
+without mutating the destination. Reconnection makes those queued messages
+eligible again, and delivery order remains deterministic.
+
+`scheduledDeliveryAttempts` counts queued delivery entries, including explicit
+duplicates. `blockedDeliveryAttempts` counts delivery calls that found no
+eligible queued link while partitioned. `successfulDeliveryCount` counts actual
+delivery applications, including already-applied duplicate deliveries, while
+`duplicateDeliveryCount` counts only those already-applied deliveries.
+`serializedOperationPayloadBytes` counts the UTF-8 JSON payload for each
+scheduled delivery entry, including entries that were temporarily blocked.
+Final state bytes and applied-operation metadata counts are separate
+measurements. Model-specific metadata not exposed by the simulator is recorded
+as unavailable rather than fabricated as zero.
+
+The retail harness metric schema is `retail-metrics-2` and the matrix version is
+`retail-5e-1`; these are intentionally distinct from earlier 5C/5D artifacts.
+Older artifacts remain interpretable under their recorded schema and are not
+rewritten by this milestone.
+
+`writeRetailExperimentArtifacts(directory, config, records)` writes `config.json`,
+`raw.jsonl`, and `summary.json` with exclusive creation and refuses to overwrite
+existing files. Failed and non-converged records remain in raw output and are
+represented in summaries. Reproduction is programmatic:
+
+```ts
+const records = runRetailExperimentMatrix({
+  matrixVersion: RETAIL_MATRIX_VERSION,
+  metricSchemaVersion: RETAIL_METRIC_SCHEMA_VERSION,
+  scenarioIds: [...supportedRetailScenarioIds],
+  seeds: [11, 23, 37],
+})
+writeRetailExperimentArtifacts("research/raw/retail-pilot", {
+  matrixVersion: RETAIL_MATRIX_VERSION,
+  metricSchemaVersion: RETAIL_METRIC_SCHEMA_VERSION,
+  scenarioIds: [...supportedRetailScenarioIds],
+  seeds: [11, 23, 37],
+}, records)
+```
+
+The harness is intended for a small pilot first. Its outputs are functional
+correctness and accounting evidence from a deterministic in-process simulator,
+not real-network measurements or a performance-superiority claim. Partition
+enforcement models simulator link eligibility only; it does not prove transport
+isolation, packet loss, crash behavior, or network performance.

@@ -1,6 +1,10 @@
 import type { HlcTimestamp } from '../crdt/clock'
 import type { ReplicaSnapshot } from '../crdt/replica'
 import type {
+  ReplicaRecord,
+  RevisionedReplicaStore,
+} from './ReplicaStore'
+import type {
   RetailCatalog,
   RetailOperation,
   RetailVersion,
@@ -65,6 +69,16 @@ export interface PersistedRetailV2Record {
 export interface AtomicMigrationTarget {
   load(): PersistedRetailV2Record | V1RetailState
   replace(record: PersistedRetailV2Record): void
+}
+
+export interface LoadedRetailMigrationState {
+  revision: number
+  value: PersistedRetailV2Record | V1RetailState
+}
+
+export interface RetailMigrationTarget {
+  load(): LoadedRetailMigrationState | undefined
+  replace(record: PersistedRetailV2Record, expectedRevision: number): void
 }
 
 const clone = <T>(value: T): T => structuredClone(value)
@@ -153,15 +167,95 @@ const validateV1 = (value: V1RetailState): void => {
     invalid('V1 pending operations are invalid')
 }
 
+const isV2Record = (
+  value: PersistedRetailV2Record | V1RetailState,
+): value is PersistedRetailV2Record => 'schemaVersion' in value && value.schemaVersion === 2
+
 const validateV2 = (value: PersistedRetailV2Record): void => {
   if (!value || value.schemaVersion !== 2) invalid('V2 schema version is invalid')
   if (!isIdentifier(value.replicaId)) invalid('V2 replica identity is invalid')
-  if (!value.state || value.state.schemaVersion !== 2) invalid('V2 state schema version is invalid')
+  if (!isRecord(value.state) || value.state.schemaVersion !== 2)
+    invalid('V2 state schema version is invalid')
   if (value.state.replicaId !== value.replicaId) invalid('V2 replica identity mismatch')
+  if (!isRecord(value.state.genericSnapshot))
+    invalid('V2 generic snapshot is missing')
+  if (!isIdentifier(value.state.genericSnapshot.replicaId))
+    invalid('V2 generic snapshot identity is invalid')
   if (!isClock(value.state.clock)) invalid('V2 clock is invalid')
   if (value.state.clock.nodeId !== value.state.genericSnapshot.replicaId)
     invalid('V2 clock identity mismatch')
+  if (!isRecord(value.state.migration))
+    invalid('V2 migration marker is missing')
   if (value.state.migration.complete !== true) invalid('V2 migration is incomplete')
+}
+
+export const adaptPersistedRetailV1Record = (
+  record: ReplicaRecord,
+): V1RetailState => {
+  if (record.schemaVersion !== 1)
+    invalid('expected a schema-version 1 retail record')
+
+  const state = record.state
+  if (!isRecord(state))
+    invalid('V1 retail record state must be an object')
+  const stateRecord = state as Record<string, unknown>
+
+  const candidate: V1RetailState = {
+    snapshot: stateRecord.snapshot as ReplicaSnapshot<string>,
+    catalog: stateRecord.catalog as RetailCatalog,
+    appliedOperationIds: stateRecord.appliedOperationIds as string[],
+    pendingOperations: stateRecord.pendingOperations as RetailOperation[] | undefined,
+  }
+
+  validateV1(candidate)
+  return clone(candidate)
+}
+
+const adaptPersistedRetailV2Record = (
+  record: ReplicaRecord,
+): PersistedRetailV2Record => {
+  if (record.schemaVersion !== 2)
+    invalid('expected a schema-version 2 retail record')
+
+  const candidate: PersistedRetailV2Record = {
+    replicaId: record.replicaId,
+    state: record.state as PersistedRetailV2,
+    schemaVersion: 2,
+    updatedAt: record.updatedAt,
+  }
+
+  validateV2(candidate)
+  return clone(candidate)
+}
+
+export const createRetailMigrationTarget = (
+  store: RevisionedReplicaStore,
+  replicaId: string,
+): RetailMigrationTarget => {
+  const key = `${replicaId}:retail`
+
+  return {
+    load: () => {
+      const loaded = store.loadWithRevision(key)
+      if (!loaded) return undefined
+
+      const value =
+        loaded.record.schemaVersion === 1
+          ? adaptPersistedRetailV1Record(loaded.record)
+          : adaptPersistedRetailV2Record(loaded.record)
+
+      return { revision: loaded.revision, value }
+    },
+    replace: (record, expectedRevision) => {
+      validateV2(record)
+      store.replaceIfRevision(key, expectedRevision, {
+        replicaId: record.replicaId,
+        state: record.state,
+        schemaVersion: 2,
+        updatedAt: record.updatedAt,
+      })
+    },
+  }
 }
 
 export const migrateV1RetailState = (
@@ -219,6 +313,24 @@ export const migrateAndCommitV1RetailState = (
   }
   const migrated = migrateV1RetailState(input, updatedAt)
   target.replace(clone(migrated))
+  return migrated
+}
+
+export const migrateLoadedRetailState = (
+  target: RetailMigrationTarget,
+  updatedAt = 0,
+): PersistedRetailV2Record => {
+  const loaded = target.load()
+
+  if (!loaded) throw new Error('Invalid retail persistence state: retail record does not exist')
+
+  if (isV2Record(loaded.value)) {
+    validateV2(loaded.value)
+    return clone(loaded.value)
+  }
+
+  const migrated = migrateV1RetailState(loaded.value, updatedAt)
+  target.replace(clone(migrated), loaded.revision)
   return migrated
 }
 

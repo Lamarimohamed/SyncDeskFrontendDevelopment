@@ -4,6 +4,7 @@ import {
   validateVersionedRetailOperation,
   type RetailVersion,
 } from './retailSync'
+import { retailVersionOrderingVectors } from './retailSync.testVectors'
 
 const version = (
   operationId: string,
@@ -43,6 +44,14 @@ describe('versioned retail operation primitives', () => {
     expect(compareRetailVersions(version('operation-z', 'replica-a', 2), version('operation-a', 'replica-a', 2))).toBeGreaterThan(0)
     expect(compareRetailVersions(version('same', 'same', 1), version('same', 'same', 1))).toBe(0)
   })
+
+  it.each(retailVersionOrderingVectors)(
+    'orders $name deterministically',
+    ({ left, right, expected }) => {
+      expect(Math.sign(compareRetailVersions(left, right))).toBe(expected)
+      expect(Math.sign(compareRetailVersions(right, left))).toBe(-expected)
+    },
+  )
 
   it('validates product and category field patches without changing the payload', () => {
     const productPatch = validateVersionedRetailOperation(operation({}))

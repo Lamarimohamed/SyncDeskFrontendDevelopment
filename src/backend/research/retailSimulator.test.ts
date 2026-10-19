@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { Product } from '../../domain/types'
 import type { Category } from '../../domain/types'
+import { compareRetailVersions } from '../../domain/retailSync'
+import { retailVersionOrderingVectors } from '../../domain/retailSync.testVectors'
 import { RetailReplicaSimulator, type RetailSimulationOperation } from './retailSimulator'
 
 const product: Product = {
@@ -63,6 +65,51 @@ const runSameFieldSchedule = (model: 'baseline' | 'candidate') => {
 }
 
 describe('deterministic retail simulator', () => {
+  it('uses the V2 comparator for Unicode operation-id tie-breaking', () => {
+    const simulator = new RetailReplicaSimulator({ products: [product] }, 'candidate')
+    const unicodeVector = retailVersionOrderingVectors.find(
+      ({ name }) => name === 'ASCII z precedes accented e in UTF-8 order',
+    )!
+    const utf8Earlier = op({
+      operationId: unicodeVector.left.operationId,
+      origin: 'A',
+      kind: 'product.field.update',
+      productId: 'p1',
+      field: 'name',
+      value: 'ASCII candidate',
+      version: {
+        ...unicodeVector.left,
+        logicalTime: 10,
+        replicaId: 'A',
+      },
+    })
+    const utf8Later = op({
+      operationId: unicodeVector.right.operationId,
+      origin: 'A',
+      kind: 'product.field.update',
+      productId: 'p1',
+      field: 'name',
+      value: 'Accented winner',
+      version: {
+        ...unicodeVector.right,
+        logicalTime: 10,
+        replicaId: 'A',
+      },
+    })
+
+    expect(compareRetailVersions(unicodeVector.left, unicodeVector.right)).toBeLessThan(0)
+    simulator.local('A', utf8Earlier)
+    simulator.local('A', utf8Later)
+    simulator.queue(unicodeVector.right.operationId, 'A', 'B')
+    simulator.queue(unicodeVector.left.operationId, 'A', 'B')
+    simulator.queue(unicodeVector.right.operationId, 'A', 'C')
+    simulator.queue(unicodeVector.left.operationId, 'A', 'C')
+    simulator.deliverAll()
+
+    expect(simulator.state('C').products[0].name).toBe('Accented winner')
+    expect(simulator.report().metrics.converged).toBe(true)
+  })
+
   it('runs the same schedule against baseline and candidate models', () => {
     expect(runSameFieldSchedule('baseline').metrics.converged).toBe(false)
     expect(runSameFieldSchedule('candidate').metrics.converged).toBe(true)
@@ -136,6 +183,75 @@ describe('deterministic retail simulator', () => {
     expect(report.states.B.appliedOperationIds).toEqual(['a-delete'])
     expect(report.metrics.duplicateDeliveries).toBe(1)
     expect(report.metrics.finalMetadataCounts.B).toBe(1)
+  })
+
+  it('blocks disconnected links without mutating the destination, then delivers after reconnection', () => {
+    const simulator = new RetailReplicaSimulator({ products: [product] })
+    const update = op({
+      operationId: 'a-name',
+      origin: 'A',
+      kind: 'product.field.update',
+      productId: 'p1',
+      field: 'name',
+      value: 'Coffee',
+    })
+    simulator.local('A', update)
+    const before = simulator.state('B')
+    simulator.partitionLink('A', 'B')
+    simulator.queue('a-name', 'A', 'B', { duplicate: true })
+
+    expect(simulator.deliverNext()).toBe(false)
+    expect(simulator.state('B')).toEqual(before)
+    expect(simulator.report().events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'blocked',
+          from: 'A',
+          target: 'B',
+          operationId: 'a-name',
+        }),
+      ]),
+    )
+    expect(simulator.report().metrics.blockedDeliveryAttempts).toBe(1)
+
+    simulator.reconnectLink('A', 'B')
+    expect(simulator.deliverNext()).toBe(true)
+    expect(simulator.deliverNext()).toBe(true)
+    const report = simulator.report()
+    expect(report.states.B.products[0].name).toBe('Coffee')
+    expect(report.metrics.duplicateDeliveries).toBe(1)
+    expect(report.metrics.scheduledDeliveryAttempts).toBe(2)
+  })
+
+  it('isolates every link touching a partitioned replica and preserves unpartitioned behavior', () => {
+    const simulator = new RetailReplicaSimulator({ products: [product] })
+    simulator.local('A', op({
+      operationId: 'a-name',
+      origin: 'A',
+      kind: 'product.field.update',
+      productId: 'p1',
+      field: 'name',
+      value: 'Coffee',
+    }))
+    simulator.partition('B')
+    simulator.queue('a-name', 'A', 'B')
+    expect(simulator.deliverNext()).toBe(false)
+    simulator.reconnect('B')
+    expect(simulator.deliverNext()).toBe(true)
+    expect(simulator.state('B').products[0].name).toBe('Coffee')
+
+    const unpartitioned = new RetailReplicaSimulator({ products: [product] })
+    unpartitioned.local('A', op({
+      operationId: 'a-name',
+      origin: 'A',
+      kind: 'product.field.update',
+      productId: 'p1',
+      field: 'name',
+      value: 'Coffee',
+    }))
+    unpartitioned.queue('a-name', 'A', 'B')
+    expect(unpartitioned.deliverNext()).toBe(true)
+    expect(unpartitioned.state('B').products[0].name).toBe('Coffee')
   })
 
   it('keeps restoration explicit and separates counter convergence from overselling', () => {

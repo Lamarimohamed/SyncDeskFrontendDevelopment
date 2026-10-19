@@ -1,14 +1,14 @@
 import type { Category, Product } from '../../domain/types'
+import {
+  compareRetailVersions,
+  type RetailVersion as RetailVersionType,
+} from '../../domain/retailSync'
+
+export type { RetailVersion } from '../../domain/retailSync'
 
 export type RetailReplicaId = 'A' | 'B' | 'C'
 export type RetailField = 'name' | 'price' | 'availability' | 'categoryId'
 export type CategoryField = 'name' | 'nameAr' | 'description'
-
-export interface RetailVersion {
-  logicalTime: number
-  replicaId: RetailReplicaId
-  operationId: string
-}
 
 export type RetailSimulationModel = 'baseline' | 'candidate'
 
@@ -20,21 +20,21 @@ export type RetailSimulationOperation =
       productId: string
       field: RetailField
       value: Product[RetailField]
-      version?: RetailVersion
+      version?: RetailVersionType
     }
   | {
       operationId: string
       origin: RetailReplicaId
       kind: 'product.delete'
       productId: string
-      version?: RetailVersion
+      version?: RetailVersionType
     }
   | {
       operationId: string
       origin: RetailReplicaId
       kind: 'product.restore'
       product: Product
-      version?: RetailVersion
+      version?: RetailVersionType
     }
   | {
       operationId: string
@@ -42,14 +42,14 @@ export type RetailSimulationOperation =
       kind: 'inventory.adjust'
       productId: string
       delta: number
-      version?: RetailVersion
+      version?: RetailVersionType
     }
   | {
       operationId: string
       origin: RetailReplicaId
       kind: 'category.update'
       category: Category
-      version?: RetailVersion
+      version?: RetailVersionType
     }
   | {
       operationId: string
@@ -58,7 +58,7 @@ export type RetailSimulationOperation =
       categoryId: string
       field: CategoryField
       value: Category[CategoryField]
-      version?: RetailVersion
+      version?: RetailVersionType
     }
 
 export interface RetailSimulationState {
@@ -70,6 +70,8 @@ export interface RetailSimulationState {
 
 export interface RetailSimulationMetrics {
   generatedOperations: number
+  scheduledDeliveryAttempts: number
+  blockedDeliveryAttempts: number
   deliveries: number
   duplicateDeliveries: number
   uniqueOperationsApplied: number
@@ -87,7 +89,15 @@ export interface RetailSimulationReport {
 }
 
 export interface RetailSimulationEvent {
-  type: 'local' | 'queued' | 'delivered' | 'duplicate' | 'dropped' | 'partition' | 'reconnect'
+  type:
+    | 'local'
+    | 'queued'
+    | 'delivered'
+    | 'duplicate'
+    | 'blocked'
+    | 'dropped'
+    | 'partition'
+    | 'reconnect'
   operationId?: string
   from?: RetailReplicaId
   target?: RetailReplicaId
@@ -122,26 +132,21 @@ const serializedBytes = (value: unknown): number => new TextEncoder().encode(JSO
 
 interface CandidateProductRecord {
   fields: Product
-  fieldVersions: Partial<Record<keyof Product, RetailVersion>>
-  tombstone?: RetailVersion
-  restoredVersion?: RetailVersion
+  fieldVersions: Partial<Record<keyof Product, RetailVersionType>>
+  tombstone?: RetailVersionType
+  restoredVersion?: RetailVersionType
 }
 
 interface CandidateCategoryRecord {
   fields: Category
-  fieldVersions: Partial<Record<keyof Category, RetailVersion>>
+  fieldVersions: Partial<Record<keyof Category, RetailVersionType>>
 }
-
-const compareVersions = (left: RetailVersion, right: RetailVersion): number =>
-  left.logicalTime - right.logicalTime ||
-  left.replicaId.localeCompare(right.replicaId) ||
-  left.operationId.localeCompare(right.operationId)
 
 export class RetailReplicaSimulator {
   private readonly states = new Map<RetailReplicaId, RetailSimulationState>()
   private readonly initialProducts = new Map<string, Product>()
   private readonly pendingDeliveries: QueuedOperation[] = []
-  private readonly partitions = new Set<RetailReplicaId>()
+  private readonly disconnectedLinks = new Set<string>()
   private readonly events: RetailSimulationEvent[] = []
   private readonly generated = new Set<string>()
   private readonly model: RetailSimulationModel
@@ -200,14 +205,34 @@ export class RetailReplicaSimulator {
 
   partition(replicaId: RetailReplicaId): void {
     this.requireReplica(replicaId)
-    this.partitions.add(replicaId)
+    for (const other of REPLICAS) {
+      if (other !== replicaId) this.disconnectedLinks.add(this.linkKey(replicaId, other))
+    }
     this.events.push({ type: 'partition', target: replicaId })
   }
 
   reconnect(replicaId: RetailReplicaId): void {
     this.requireReplica(replicaId)
-    this.partitions.delete(replicaId)
+    for (const other of REPLICAS) {
+      if (other !== replicaId) this.disconnectedLinks.delete(this.linkKey(replicaId, other))
+    }
     this.events.push({ type: 'reconnect', target: replicaId })
+  }
+
+  partitionLink(from: RetailReplicaId, target: RetailReplicaId): void {
+    this.requireReplica(from)
+    this.requireReplica(target)
+    if (from === target) throw new Error('Cannot partition a replica from itself')
+    this.disconnectedLinks.add(this.linkKey(from, target))
+    this.events.push({ type: 'partition', from, target })
+  }
+
+  reconnectLink(from: RetailReplicaId, target: RetailReplicaId): void {
+    this.requireReplica(from)
+    this.requireReplica(target)
+    if (from === target) throw new Error('Cannot reconnect a replica to itself')
+    this.disconnectedLinks.delete(this.linkKey(from, target))
+    this.events.push({ type: 'reconnect', from, target })
   }
 
   queue(operationId: string, from: RetailReplicaId, target: RetailReplicaId, options: { duplicate?: boolean; delay?: number } = {}): void {
@@ -227,7 +252,7 @@ export class RetailReplicaSimulator {
       from,
       target,
       operationId,
-      detail: this.partitions.has(from) || this.partitions.has(target) ? 'partitioned' : undefined,
+      detail: this.isLinkDisconnected(from, target) ? 'partitioned' : undefined,
     })
     if (options.duplicate) {
       this.pendingDeliveries.push({ ...queued, sequence: ++this.sequence })
@@ -243,7 +268,20 @@ export class RetailReplicaSimulator {
   deliverNext(): boolean {
     if (this.pendingDeliveries.length === 0) return false
     this.pendingDeliveries.sort((a, b) => a.deliverAt - b.deliverAt || a.sequence - b.sequence)
-    const queued = this.pendingDeliveries.shift()!
+    const queuedIndex = this.pendingDeliveries.findIndex(
+      (candidate) => !this.isLinkDisconnected(candidate.from, candidate.target),
+    )
+    if (queuedIndex === -1) {
+      this.events.push({
+        type: 'blocked',
+        from: this.pendingDeliveries[0].from,
+        target: this.pendingDeliveries[0].target,
+        operationId: this.pendingDeliveries[0].operation.operationId,
+        detail: 'partitioned',
+      })
+      return false
+    }
+    const queued = this.pendingDeliveries.splice(queuedIndex, 1)[0]
     this.virtualTime = Math.max(this.virtualTime, queued.deliverAt)
     const state = this.requireReplica(queued.target)
     const before = state.appliedOperationIds.length
@@ -285,6 +323,10 @@ export class RetailReplicaSimulator {
       states,
       metrics: {
         generatedOperations: this.generated.size,
+        scheduledDeliveryAttempts: this.events.filter(
+          (event) => event.type === 'queued' || (event.type === 'duplicate' && !event.detail),
+        ).length,
+        blockedDeliveryAttempts: this.events.filter((event) => event.type === 'blocked').length,
         deliveries,
         duplicateDeliveries,
         uniqueOperationsApplied: new Set(REPLICAS.flatMap((id) => states[id].appliedOperationIds)).size,
@@ -339,7 +381,7 @@ export class RetailReplicaSimulator {
       const record = products.get(operation.productId)
       if (!record || record.tombstone) return
       const previous = record.fieldVersions[operation.field]
-      if (!previous || compareVersions(version, previous) > 0) {
+      if (!previous || compareRetailVersions(version, previous) > 0) {
         record.fields = { ...record.fields, [operation.field]: operation.value }
         record.fieldVersions[operation.field] = version
       }
@@ -347,13 +389,13 @@ export class RetailReplicaSimulator {
       const record = products.get(operation.productId)
       if (
         record &&
-        (!record.restoredVersion || compareVersions(version, record.restoredVersion) > 0) &&
-        (!record.tombstone || compareVersions(version, record.tombstone) > 0)
+        (!record.restoredVersion || compareRetailVersions(version, record.restoredVersion) > 0) &&
+        (!record.tombstone || compareRetailVersions(version, record.tombstone) > 0)
       )
         record.tombstone = version
     } else if (operation.kind === 'product.restore') {
       const existing = products.get(operation.product.id)
-      if (!existing || !existing.tombstone || compareVersions(version, existing.tombstone) > 0) {
+      if (!existing || !existing.tombstone || compareRetailVersions(version, existing.tombstone) > 0) {
         products.set(operation.product.id, {
           fields: clone(operation.product),
           fieldVersions: {},
@@ -368,7 +410,7 @@ export class RetailReplicaSimulator {
       const record = categories.get(operation.category.id) ?? { fields: clone(operation.category), fieldVersions: {} }
       for (const field of ['name', 'nameAr', 'description'] as const) {
         const previous = record.fieldVersions[field]
-        if (!previous || compareVersions(version, previous) > 0) {
+        if (!previous || compareRetailVersions(version, previous) > 0) {
           record.fields = { ...record.fields, [field]: operation.category[field] }
           record.fieldVersions[field] = version
         }
@@ -378,7 +420,7 @@ export class RetailReplicaSimulator {
       const record = categories.get(operation.categoryId)
       if (!record) return
       const previous = record.fieldVersions[operation.field]
-      if (!previous || compareVersions(version, previous) > 0) {
+      if (!previous || compareRetailVersions(version, previous) > 0) {
         record.fields = { ...record.fields, [operation.field]: operation.value }
         record.fieldVersions[operation.field] = version
       }
@@ -392,6 +434,14 @@ export class RetailReplicaSimulator {
     const operation = this.operations.get(operationId)
     if (!operation) throw new Error(`Unknown generated operation ${operationId}`)
     return operation
+  }
+
+  private linkKey(from: RetailReplicaId, target: RetailReplicaId): string {
+    return [from, target].sort().join(':')
+  }
+
+  private isLinkDisconnected(from: RetailReplicaId, target: RetailReplicaId): boolean {
+    return from !== target && this.disconnectedLinks.has(this.linkKey(from, target))
   }
 
   private readonly operations = new Map<string, RetailSimulationOperation>()

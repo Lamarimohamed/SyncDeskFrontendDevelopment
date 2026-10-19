@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest"
 
-import { FileReplicaStore, ReplicaStore } from "./ReplicaStore"
+import {
+  FileReplicaStore,
+  FileReplicaStoreLockError,
+  ReplicaRevisionConflictError,
+  ReplicaStore,
+} from "./ReplicaStore"
 
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 
 import { tmpdir } from "node:os"
 
@@ -49,6 +54,26 @@ describe("replica persistence", () => {
     expect(store.load("r1")?.state).toEqual({ metadata: { counter: 1 } })
   })
 
+  it("rejects a stale in-memory replacement", () => {
+    const store = new ReplicaStore()
+    store.save("r1", { value: "v1" })
+    const loaded = store.loadWithRevision("r1")
+
+    if (!loaded) throw new Error("Expected a stored record")
+
+    store.save("r1", { value: "v2" })
+
+    expect(() =>
+      store.replaceIfRevision("r1", loaded.revision, {
+        replicaId: "r1",
+        state: { value: "stale" },
+        schemaVersion: 2,
+        updatedAt: 3,
+      }),
+    ).toThrow(ReplicaRevisionConflictError)
+    expect(store.load("r1")?.state).toEqual({ value: "v2" })
+  })
+
   it("restores records from a new file-backed store instance", () => {
     const directory = mkdtempSync(join(tmpdir(), "syncdesk-replica-"))
 
@@ -64,6 +89,55 @@ describe("replica persistence", () => {
         value: "v1",
         clock: { logicalCounter: 2 },
       })
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects a second file-backed writer while preserving the existing record", () => {
+    const directory = mkdtempSync(join(tmpdir(), "syncdesk-replica-lock-"))
+    const path = join(directory, "replicas.json")
+
+    try {
+      const store = new FileReplicaStore(path)
+      store.save("r1", { value: "v1" })
+      writeFileSync(`${path}.lock`, "test lock", "utf8")
+
+      expect(() => store.save("r1", { value: "should-not-persist" })).toThrow(
+        FileReplicaStoreLockError,
+      )
+      expect(new FileReplicaStore(path).load("r1")?.state).toEqual({
+        value: "v1",
+      })
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects a stale replacement across independent file store instances", () => {
+    const directory = mkdtempSync(join(tmpdir(), "syncdesk-replica-cas-"))
+    const path = join(directory, "replicas.json")
+
+    try {
+      const first = new FileReplicaStore(path)
+      const second = new FileReplicaStore(path)
+      first.save("r1", { value: "v1" })
+      const firstRead = first.loadWithRevision("r1")
+      const secondRead = second.loadWithRevision("r1")
+
+      if (!firstRead || !secondRead) throw new Error("Expected stored records")
+
+      first.save("r1", { value: "v2" })
+
+      expect(() =>
+        second.replaceIfRevision("r1", secondRead.revision, {
+          replicaId: "r1",
+          state: { value: "stale" },
+          schemaVersion: 2,
+          updatedAt: 3,
+        }),
+      ).toThrow(ReplicaRevisionConflictError)
+      expect(first.load("r1")?.state).toEqual({ value: "v2" })
     } finally {
       rmSync(directory, { recursive: true, force: true })
     }

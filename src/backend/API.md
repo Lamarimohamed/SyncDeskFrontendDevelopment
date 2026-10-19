@@ -45,6 +45,15 @@ File persistence is atomic at the single-file rename operation used by the
 existing class, but it does not provide cross-process locking or a claim of
 crash durability.
 
+The migration foundation also exposes a revision-checked replacement boundary
+for the retail record. It validates the complete V2 record before replacement
+and uses a sidecar lock file to serialize file-backed mutations across
+independent processes. Reads remain unlocked. A stale revision is rejected
+while the write lock is held. The lock is not crash-recoverable: a process
+that dies while holding it can leave a lock file requiring operator cleanup.
+This boundary does not make the existing V1 runtime use V2 records; that
+remains future migration work.
+
 ## Endpoints
 
 ### `GET /health`

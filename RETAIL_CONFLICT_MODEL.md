@@ -5,9 +5,9 @@ multi-replica retail convergence is implemented.
 
 ## Current repository state
 
-The latest committed integration is `f09d79f` (`Connect frontend sync to
-backend API`). The working tree also contains the uncommitted retail API and
-catalog hydration changes being audited in this milestone.
+The latest committed integration is `bb9d014` (`Add versioned retail sync and
+migration foundation`). The current V2 migration work remains isolated from
+the production runtime.
 
 The current generic replica contains:
 
@@ -384,8 +384,10 @@ The smallest production implementation would touch:
   maintain field registers/tombstones, detect operation-ID collisions, and
   expose schema/compatibility status.
 - `src/backend/api/server.ts`: route v2 validation and preserve v1 routes.
-- `src/backend/persistence/replicaStore.ts`: support schema version 2,
-  atomic migration, and strict restart recovery.
+- `src/backend/persistence/ReplicaStore.ts`: integrate a revision-checked
+  retail replacement boundary while preserving the existing V1 save path.
+  File-backed mutations use a sidecar lock to serialize independent writers;
+  crash recovery and filesystem durability remain unresolved.
 - `src/repositories/Repository.ts` and `src/repositories/MockRepository.ts`:
   create versioned pending patches while preserving v1 pending replay.
 - `src/services/backendApi.ts`: negotiate operation schema and surface
