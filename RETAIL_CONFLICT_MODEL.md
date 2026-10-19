@@ -5,8 +5,8 @@ multi-replica retail convergence is implemented.
 
 ## Current repository state
 
-The latest committed integration is `bb9d014` (`Add versioned retail sync and
-migration foundation`). The current V2 migration work remains isolated from
+The latest committed integration is `1383c56` (`Preserve retail research pilots
+and enforce partitions`). The current V2 migration work remains isolated from
 the production runtime.
 
 The current generic replica contains:

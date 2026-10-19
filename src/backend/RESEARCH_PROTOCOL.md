@@ -121,8 +121,9 @@ inventory-delta exploratory case. Inventory convergence is reported separately
 from overselling or other business correctness.
 
 Each raw record contains the resolved scenario, workload and initial-state
-hashes, model, matrix and metric schema versions, convergence status, failure
-details, and simulator accounting. The retail simulator uses symmetric
+hashes, model, matrix and metric schema versions, visible-state and
+protocol-state convergence status, failure details, and simulator accounting.
+The retail simulator uses symmetric
 link-level partitions: `partition(A)` disconnects A from every other replica,
 while `partitionLink(A, B)` disconnects only the A/B link. Messages queued across
 a disconnected link remain pending; a delivery call records a blocked attempt
@@ -141,14 +142,32 @@ measurements. Model-specific metadata not exposed by the simulator is recorded
 as unavailable rather than fabricated as zero.
 
 The retail harness metric schema is `retail-metrics-2` and the matrix version is
-`retail-5e-1`; these are intentionally distinct from earlier 5C/5D artifacts.
-Older artifacts remain interpretable under their recorded schema and are not
-rewritten by this milestone.
+`retail-5e-1` for the preserved 5E evidence. New hardened runs use
+`retail-metrics-3` and `retail-5h-1`; these are intentionally distinct from
+earlier artifacts. Older artifacts remain interpretable under their recorded
+schema and are not rewritten.
 
-`writeRetailExperimentArtifacts(directory, config, records)` writes `config.json`,
-`raw.jsonl`, and `summary.json` with exclusive creation and refuses to overwrite
-existing files. Failed and non-converged records remain in raw output and are
-represented in summaries. Reproduction is programmatic:
+The canonical ordering used by the simulator and harness compares UTF-8 bytes,
+not locale-sensitive string ordering. Seeds are deterministic inputs: fixed
+regression scenarios may retain one schedule, while scenarios marked as
+schedule-varied must retain a resolved scenario for every `(scenarioId, seed)`
+pair in `config.json`. Baseline and candidate always replay that exact pair.
+
+Visible-state convergence means products, categories, and inventory deltas agree.
+Protocol-state convergence additionally requires the applied-operation identifier
+sets to agree. The two predicates are reported separately; neither implies
+production retail convergence.
+
+`writeRetailExperimentArtifacts(directory, config, records)` writes
+`config.json`, `raw.jsonl`, `summary.json`, and a final `manifest.json` completion
+marker with exclusive creation and refuses to overwrite existing files. A
+directory is complete only when the manifest exists with `complete: true`;
+interrupted writes leave any already-created files in place and must be treated
+as incomplete rather than recovered in place. Use a new absent directory for a
+retry. Invalid matrix configuration is rejected before execution and produces
+no run records; runtime failures are retained as failed records. Failed and
+non-converged records remain in raw output and are represented in summaries.
+Reproduction is programmatic:
 
 ```ts
 const records = runRetailExperimentMatrix({

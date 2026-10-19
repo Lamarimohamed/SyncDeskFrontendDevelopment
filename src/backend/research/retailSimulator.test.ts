@@ -115,6 +115,24 @@ describe('deterministic retail simulator', () => {
     expect(runSameFieldSchedule('candidate').metrics.converged).toBe(true)
   })
 
+  it('uses locale-independent canonical state ordering and separates protocol convergence', () => {
+    const first = new RetailReplicaSimulator({ products: [product] }, 'baseline')
+    const second = new RetailReplicaSimulator({ products: [product] }, 'baseline')
+    const noOp = op({
+      operationId: 'missing-product',
+      origin: 'A',
+      kind: 'product.field.update',
+      productId: 'missing',
+      field: 'name',
+      value: 'Éclair',
+    })
+    first.local('A', noOp)
+    second.local('A', noOp)
+    expect(first.report().metrics.converged).toBe(true)
+    expect(first.report().metrics.protocolStateConverged).toBe(false)
+    expect(first.report().metrics).toEqual(second.report().metrics)
+  })
+
   it('preserves independent operations and records deterministic transfer metrics', () => {
     const simulator = new RetailReplicaSimulator({ products: [product] })
     simulator.local('A', op({ operationId: 'a-name', origin: 'A', kind: 'product.field.update', productId: 'p1', field: 'name', value: 'Coffee' }))

@@ -11,8 +11,8 @@ import {
   type RetailSimulationState,
 } from './retailSimulator'
 
-export const RETAIL_MATRIX_VERSION = 'retail-5e-1'
-export const RETAIL_METRIC_SCHEMA_VERSION = 'retail-metrics-2'
+export const RETAIL_MATRIX_VERSION = 'retail-5h-1'
+export const RETAIL_METRIC_SCHEMA_VERSION = 'retail-metrics-3'
 
 export type RetailExperimentModel = 'baseline' | 'candidate'
 
@@ -50,8 +50,14 @@ export interface RetailExperimentConfig {
   runPrefix?: string
 }
 
+export interface RetailResolvedScenarioManifest {
+  scenarioId: string
+  seed: number
+  scenario: RetailExperimentScenario
+}
+
 export interface RetailExperimentRecord {
-  schemaVersion: 1
+  schemaVersion: 2
   matrixVersion: typeof RETAIL_MATRIX_VERSION
   metricSchemaVersion: typeof RETAIL_METRIC_SCHEMA_VERSION
   runId: string
@@ -71,6 +77,7 @@ export interface RetailExperimentRecord {
   finalStateHash: string | null
   finalStateBytes: number | null
   metadataCounts: Record<RetailReplicaId, number> | null
+  protocolStateConverged: boolean
   converged: boolean
   failed: boolean
   failureClass: 'configuration' | 'runtime' | undefined
@@ -79,7 +86,7 @@ export interface RetailExperimentRecord {
 }
 
 export interface RetailExperimentSummary {
-  schemaVersion: 1
+  schemaVersion: 2
   matrixVersion: typeof RETAIL_MATRIX_VERSION
   metricSchemaVersion: typeof RETAIL_METRIC_SCHEMA_VERSION
   groups: Array<{
@@ -89,6 +96,7 @@ export interface RetailExperimentSummary {
     convergedRuns: number
     failedRuns: number
     nonConvergedRuns: number
+    protocolConvergedRuns: number
     finalStateHashAgreement: boolean | null
   }>
 }
@@ -146,6 +154,8 @@ const product = (): Product => ({
   updatedAt: 1767225600000,
 })
 
+const secondProduct = (): Product => ({ ...product(), id: 'p2', name: 'Coffee' })
+
 const category = (): Category => ({
   id: 'c1',
   name: 'Drinks',
@@ -199,13 +209,19 @@ const scenario = (
   description: string,
   operations: RetailSimulationOperation[],
   schedule: RetailScheduleAction[],
+  initialState: RetailInitialState = { products: [product()], categories: [category()] },
 ): RetailExperimentScenario => ({
   scenarioId,
   description,
-  initialState: { products: [product()], categories: [category()] },
+  initialState,
   operations,
   schedule,
 })
+
+const seedReversesOrder = (seed: number): boolean => Math.abs(seed % 5) >= 2
+
+const orderForSeed = <T>(values: T[], seed: number): T[] =>
+  seedReversesOrder(seed) ? [...values].reverse() : [...values]
 
 const buildScenario = (scenarioId: string, seed: number): RetailExperimentScenario => {
   const sameField = [
@@ -232,10 +248,44 @@ const buildScenario = (scenarioId: string, seed: number): RetailExperimentScenar
 
   switch (scenarioId) {
     case 'no-conflict':
+      return scenario(
+        scenarioId,
+        'Independent products edited on different replicas.',
+        [
+          withVersion(
+            scenarioOperation('a-name', 'A', {
+              kind: 'product.field.update',
+              productId: 'p1',
+              field: 'name',
+              value: 'Coffee',
+            }),
+            10,
+          ),
+          withVersion(
+            scenarioOperation('b-price', 'B', {
+              kind: 'product.field.update',
+              productId: 'p2',
+              field: 'name',
+              value: 'Latte',
+            }),
+            10,
+          ),
+        ],
+        [
+          { type: 'local', replicaId: 'A', operationId: 'a-name' },
+          { type: 'local', replicaId: 'B', operationId: 'b-price' },
+          ...orderForSeed(
+            [...queueTo('a-name', 'A', ['B', 'C']), ...queueTo('b-price', 'B', ['A', 'C'])],
+            seed,
+          ),
+          { type: 'deliver-all' },
+        ],
+        { products: [product(), secondProduct()], categories: [category()] },
+      )
     case 'different-field':
       return scenario(
         scenarioId,
-        'Independent product fields edited on different replicas.',
+        'Independent fields on one product edited by different replicas.',
         [
           withVersion(
             scenarioOperation('a-name', 'A', {
@@ -259,8 +309,10 @@ const buildScenario = (scenarioId: string, seed: number): RetailExperimentScenar
         [
           { type: 'local', replicaId: 'A', operationId: 'a-name' },
           { type: 'local', replicaId: 'B', operationId: 'b-price' },
-          ...queueTo('a-name', 'A', ['B', 'C']),
-          ...queueTo('b-price', 'B', ['A', 'C']),
+          ...orderForSeed(
+            [...queueTo('a-name', 'A', ['B', 'C']), ...queueTo('b-price', 'B', ['A', 'C'])],
+            seed,
+          ),
           { type: 'deliver-all' },
         ],
       )
@@ -272,7 +324,7 @@ const buildScenario = (scenarioId: string, seed: number): RetailExperimentScenar
         [
           { type: 'local', replicaId: 'A', operationId: 'a-name' },
           { type: 'local', replicaId: 'B', operationId: 'b-name' },
-          ...deliveryOrder.flatMap((operationId) => {
+          ...orderForSeed(deliveryOrder, seed).flatMap((operationId) => {
             const from = operationId.startsWith('a') ? 'A' : 'B'
             return queueTo(operationId, from, ['A', 'B', 'C'])
           }),
@@ -301,8 +353,10 @@ const buildScenario = (scenarioId: string, seed: number): RetailExperimentScenar
         [
           { type: 'local', replicaId: 'A', operationId: 'a-delete' },
           { type: 'local', replicaId: 'B', operationId: 'b-update' },
-          ...queueTo('a-delete', 'A', ['B', 'C']),
-          ...queueTo('b-update', 'B', ['A', 'C']),
+          ...orderForSeed(
+            [...queueTo('a-delete', 'A', ['B', 'C']), ...queueTo('b-update', 'B', ['A', 'C'])],
+            seed,
+          ),
           { type: 'deliver-all' },
         ],
       )
@@ -326,8 +380,10 @@ const buildScenario = (scenarioId: string, seed: number): RetailExperimentScenar
         [
           { type: 'local', replicaId: 'A', operationId: 'a-delete' },
           { type: 'local', replicaId: 'B', operationId: 'b-restore' },
-          ...queueTo('b-restore', 'B', ['A', 'C']),
-          ...queueTo('a-delete', 'A', ['B', 'C'], { delay: 1 }),
+          ...orderForSeed(
+            [...queueTo('b-restore', 'B', ['A', 'C']), ...queueTo('a-delete', 'A', ['B', 'C'], { delay: 1 })],
+            seed,
+          ),
           { type: 'deliver-all' },
         ],
       )
@@ -341,8 +397,7 @@ const buildScenario = (scenarioId: string, seed: number): RetailExperimentScenar
           { type: 'local', replicaId: 'B', operationId: 'b-name' },
           { type: 'queue', operationId: 'b-name', from: 'B', target: 'C', duplicate: true, delay: 2 },
           { type: 'queue', operationId: 'a-name', from: 'A', target: 'C', delay: 1 },
-          ...queueTo('a-name', 'A', ['B']),
-          ...queueTo('b-name', 'B', ['A']),
+          ...orderForSeed([...queueTo('a-name', 'A', ['B']), ...queueTo('b-name', 'B', ['A'])], seed),
           { type: 'deliver-all' },
         ],
       )
@@ -385,9 +440,14 @@ const buildScenario = (scenarioId: string, seed: number): RetailExperimentScenar
           { type: 'local', replicaId: 'A', operationId: 'a-name' },
           { type: 'local', replicaId: 'B', operationId: 'b-price' },
           { type: 'local', replicaId: 'C', operationId: 'c-availability' },
-          ...queueTo('a-name', 'A', ['B', 'C']),
-          ...queueTo('b-price', 'B', ['A', 'C']),
-          ...queueTo('c-availability', 'C', ['A', 'B']),
+          ...orderForSeed(
+            [
+              ...queueTo('a-name', 'A', ['B', 'C']),
+              ...queueTo('b-price', 'B', ['A', 'C']),
+              ...queueTo('c-availability', 'C', ['A', 'B']),
+            ],
+            seed,
+          ),
           { type: 'deliver-all' },
           { type: 'reconnect', replicaId: 'B' },
           { type: 'reconnect', replicaId: 'C' },
@@ -417,8 +477,10 @@ const buildScenario = (scenarioId: string, seed: number): RetailExperimentScenar
         [
           { type: 'local', replicaId: 'A', operationId: 'a-category' },
           { type: 'local', replicaId: 'B', operationId: 'b-category' },
-          ...queueTo('a-category', 'A', ['B', 'C']),
-          ...queueTo('b-category', 'B', ['A', 'C']),
+          ...orderForSeed(
+            [...queueTo('a-category', 'A', ['B', 'C']), ...queueTo('b-category', 'B', ['A', 'C'])],
+            seed,
+          ),
           { type: 'deliver-all' },
         ],
       )
@@ -439,8 +501,10 @@ const buildScenario = (scenarioId: string, seed: number): RetailExperimentScenar
         [
           { type: 'local', replicaId: 'A', operationId: 'a-restock' },
           { type: 'local', replicaId: 'B', operationId: 'b-sale' },
-          ...queueTo('a-restock', 'A', ['B', 'C']),
-          ...queueTo('b-sale', 'B', ['A', 'C']),
+          ...orderForSeed(
+            [...queueTo('a-restock', 'A', ['B', 'C']), ...queueTo('b-sale', 'B', ['A', 'C'])],
+            seed,
+          ),
           { type: 'deliver-all' },
         ],
       )
@@ -468,6 +532,8 @@ const validateConfig = (config: RetailExperimentConfig): void => {
   if (new Set(config.scenarioIds).size !== config.scenarioIds.length) throw new Error('Retail scenario IDs must be unique')
   if (new Set(config.seeds).size !== config.seeds.length) throw new Error('Retail seeds must be unique')
   if (config.seeds.some((seed) => !Number.isSafeInteger(seed))) throw new Error('Retail seeds must be safe integers')
+  if (config.scenarioIds.some((scenarioId) => !(supportedRetailScenarioIds as readonly string[]).includes(scenarioId)))
+    throw new Error('Invalid retail experiment configuration: unknown scenario')
 }
 
 const execute = (scenario: RetailExperimentScenario, model: RetailExperimentModel): RetailSimulationReport => {
@@ -504,7 +570,7 @@ const failedRecord = (
   error: Error,
   failureClass: 'configuration' | 'runtime',
 ): RetailExperimentRecord => ({
-  schemaVersion: 1,
+  schemaVersion: 2,
   matrixVersion: RETAIL_MATRIX_VERSION,
   metricSchemaVersion: RETAIL_METRIC_SCHEMA_VERSION,
   runId,
@@ -524,6 +590,7 @@ const failedRecord = (
   finalStateHash: null,
   finalStateBytes: null,
   metadataCounts: null,
+  protocolStateConverged: false,
   converged: false,
   failed: true,
   failureClass,
@@ -540,7 +607,7 @@ const successfulRecord = (
 ): RetailExperimentRecord => {
   const canonicalStates = REPLICAS.map((replicaId) => stateForHash(report.states[replicaId]))
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     matrixVersion: RETAIL_MATRIX_VERSION,
     metricSchemaVersion: RETAIL_METRIC_SCHEMA_VERSION,
     runId,
@@ -560,6 +627,7 @@ const successfulRecord = (
     finalStateHash: report.metrics.converged ? sha256(canonicalStates[0]) : null,
     finalStateBytes: report.metrics.converged ? bytes(canonicalStates[0]) : null,
     metadataCounts: report.metrics.finalMetadataCounts,
+    protocolStateConverged: report.metrics.protocolStateConverged,
     converged: report.metrics.converged,
     failed: false,
     failureClass: undefined,
@@ -591,7 +659,7 @@ export const runRetailExperimentMatrix = (config: RetailExperimentConfig): Retai
 }
 
 export const summarizeRetailExperiments = (records: RetailExperimentRecord[]): RetailExperimentSummary => ({
-  schemaVersion: 1,
+  schemaVersion: 2,
   matrixVersion: RETAIL_MATRIX_VERSION,
   metricSchemaVersion: RETAIL_METRIC_SCHEMA_VERSION,
   groups: [...new Map(records.map((record) => [`${record.scenarioId}:${record.model}`, records.filter((candidate) => candidate.scenarioId === record.scenarioId && candidate.model === record.model)] as const)).entries()].map(
@@ -605,28 +673,53 @@ export const summarizeRetailExperiments = (records: RetailExperimentRecord[]): R
         convergedRuns: grouped.filter((record) => record.converged).length,
         failedRuns: grouped.filter((record) => record.failed).length,
         nonConvergedRuns: grouped.filter((record) => !record.failed && !record.converged).length,
+        protocolConvergedRuns: grouped.filter((record) => !record.failed && record.protocolStateConverged).length,
         finalStateHashAgreement: hashes.size ? hashes.size === 1 : null,
       }
     },
   ),
 })
 
-const writeExclusive = (path: string, content: string): void => {
+type ResearchWriteFile = (path: string, content: string) => void
+
+const writeExclusive = (path: string, content: string, write: ResearchWriteFile = (filePath, value) =>
+  writeFileSync(filePath, value, { encoding: 'utf8', flag: 'wx' }),
+): void => {
   if (existsSync(path)) throw new Error(`Refusing to overwrite existing research artifact: ${path}`)
-  writeFileSync(path, content, { encoding: 'utf8', flag: 'wx' })
+  write(path, content)
 }
 
 export const writeRetailExperimentArtifacts = (
   directory: string,
   config: RetailExperimentConfig,
   records: RetailExperimentRecord[],
+  options: { writeFile?: ResearchWriteFile } = {},
 ): void => {
   if (!directory.trim()) throw new Error('Research artifact directory is required')
   mkdirSync(directory, { recursive: true })
-  const resolvedScenarios = [...new Map(records.map((record) => [record.scenarioId, record.scenario])).values()]
-  writeExclusive(join(directory, 'config.json'), `${canonicalSerialize({ ...config, resolvedScenarios })}\n`)
-  writeExclusive(join(directory, 'raw.jsonl'), `${records.map((record) => canonicalSerialize(record)).join('\n')}\n`)
-  writeExclusive(join(directory, 'summary.json'), `${canonicalSerialize(summarizeRetailExperiments(records))}\n`)
+  const resolvedScenarios: RetailResolvedScenarioManifest[] = [
+    ...new Map(
+      records.map((record) => [
+        `${record.scenarioId}:${record.seed}`,
+        { scenarioId: record.scenarioId, seed: record.seed, scenario: record.scenario },
+      ]),
+    ).values(),
+  ]
+  const write = options.writeFile
+  writeExclusive(join(directory, 'config.json'), `${canonicalSerialize({ ...config, resolvedScenarios })}\n`, write)
+  writeExclusive(join(directory, 'raw.jsonl'), `${records.map((record) => canonicalSerialize(record)).join('\n')}\n`, write)
+  writeExclusive(join(directory, 'summary.json'), `${canonicalSerialize(summarizeRetailExperiments(records))}\n`, write)
+  writeExclusive(
+    join(directory, 'manifest.json'),
+    `${canonicalSerialize({
+      artifactSchemaVersion: 1,
+      matrixVersion: config.matrixVersion,
+      metricSchemaVersion: config.metricSchemaVersion,
+      recordCount: records.length,
+      complete: true,
+    })}\n`,
+    write,
+  )
 }
 
 export const buildRetailScenarioForTesting = (scenarioId: string, seed: number): RetailExperimentScenario =>

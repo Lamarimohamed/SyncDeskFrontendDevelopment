@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -42,6 +42,30 @@ describe('reproducible retail experiment harness', () => {
     expect(records[0].scenario).toEqual(records[1].scenario)
     expect(records[0].workloadHash).toBe(records[1].workloadHash)
     expect(records[0].initialStateHash).toBe(records[1].initialStateHash)
+  })
+
+  it('records every resolved scenario and varies intended schedules by seed', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'syncdesk-retail-manifest-'))
+    try {
+      const records = runRetailExperimentMatrix({ ...config, scenarioIds: ['different-field'], seeds: [11, 23] })
+      writeRetailExperimentArtifacts(directory, { ...config, scenarioIds: ['different-field'], seeds: [11, 23] }, records)
+      const manifest = JSON.parse(readFileSync(join(directory, 'config.json'), 'utf8'))
+      expect(manifest.resolvedScenarios).toHaveLength(2)
+      expect(manifest.resolvedScenarios[0].seed).not.toBe(manifest.resolvedScenarios[1].seed)
+      expect(manifest.resolvedScenarios[0].scenario.schedule).not.toEqual(manifest.resolvedScenarios[1].scenario.schedule)
+      expect(records[0].protocolStateConverged).toBe(true)
+      expect(readFileSync(join(directory, 'manifest.json'), 'utf8')).toContain('"complete":true')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps no-conflict distinct from different-field', () => {
+    const noConflict = buildRetailScenarioForTesting('no-conflict', 11)
+    const differentField = buildRetailScenarioForTesting('different-field', 11)
+    expect(noConflict.initialState.products).toHaveLength(2)
+    expect(differentField.initialState.products).toHaveLength(1)
+    expect(noConflict.operations).not.toEqual(differentField.operations)
   })
 
   it('generates every supported scenario with an explicit schedule', () => {
@@ -117,6 +141,7 @@ describe('reproducible retail experiment harness', () => {
       expect(JSON.parse(readFileSync(join(directory, 'config.json'), 'utf8')).resolvedScenarios).toHaveLength(1)
       expect(readFileSync(join(directory, 'raw.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2)
       expect(JSON.parse(readFileSync(join(directory, 'summary.json'), 'utf8')).groups).toHaveLength(2)
+      expect(JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8')).complete).toBe(true)
       expect(() => writeRetailExperimentArtifacts(directory, config, records)).toThrow('Refusing to overwrite')
     } finally {
       rmSync(directory, { recursive: true, force: true })
@@ -124,9 +149,31 @@ describe('reproducible retail experiment harness', () => {
   })
 
   it('rejects invalid configuration and canonicalizes object key order', () => {
-    expect(() => runRetailExperimentMatrix({ ...config, scenarioIds: ['unknown'] })).toThrow('Unknown retail scenario')
+    expect(() => runRetailExperimentMatrix({ ...config, scenarioIds: ['unknown'] })).toThrow('Invalid retail experiment configuration')
+    expect(() => runRetailExperimentMatrix({ ...config, seeds: [Number.NaN] })).toThrow('safe integers')
     expect(sha256({ b: 2, a: 1 })).toBe(sha256({ a: 1, b: 2 }))
     expect(canonicalSerialize({ b: 2, a: 1 })).toBe('{"a":1,"b":2}')
+  })
+
+  it('does not publish a completion manifest after a partial write failure', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'syncdesk-retail-partial-'))
+    try {
+      const records = runRetailExperimentMatrix({ ...config, scenarioIds: ['no-conflict'], seeds: [11] })
+      let writes = 0
+      expect(() =>
+        writeRetailExperimentArtifacts(directory, { ...config, scenarioIds: ['no-conflict'], seeds: [11] }, records, {
+          writeFile: (path, content) => {
+            writes += 1
+            if (writes === 2) throw new Error('simulated write failure')
+            writeFileSync(path, content, { encoding: 'utf8', flag: 'wx' })
+          },
+        }),
+      ).toThrow('simulated write failure')
+      expect(existsSync(join(directory, 'config.json'))).toBe(true)
+      expect(existsSync(join(directory, 'manifest.json'))).toBe(false)
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 
   it('does not turn unavailable metrics into zero', () => {

@@ -99,6 +99,8 @@ const compareBytes = (left: Uint8Array, right: Uint8Array): number => {
 const compareIdentifiers = (left: string, right: string): number =>
   compareBytes(new TextEncoder().encode(left), new TextEncoder().encode(right))
 
+export const compareRetailUtf8 = compareIdentifiers
+
 export const compareRetailVersions = (
   left: RetailVersion,
   right: RetailVersion,

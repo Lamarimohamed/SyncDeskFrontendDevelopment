@@ -1,5 +1,6 @@
 import type { Category, Product } from '../../domain/types'
 import {
+  compareRetailUtf8,
   compareRetailVersions,
   type RetailVersion as RetailVersionType,
 } from '../../domain/retailSync'
@@ -78,6 +79,7 @@ export interface RetailSimulationMetrics {
   bytesTransferred: number
   finalStateBytes: Record<RetailReplicaId, number>
   finalMetadataCounts: Record<RetailReplicaId, number>
+  protocolStateConverged: boolean
   converged: boolean
 }
 
@@ -117,11 +119,14 @@ const REPLICAS: RetailReplicaId[] = ['A', 'B', 'C']
 const clone = <T>(value: T): T => structuredClone(value)
 
 const canonicalize = (value: unknown): unknown => {
-  if (Array.isArray(value)) return value.map(canonicalize).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+  if (Array.isArray(value))
+    return value
+      .map(canonicalize)
+      .sort((left, right) => compareRetailUtf8(JSON.stringify(left), JSON.stringify(right)))
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .sort(([a], [b]) => a.localeCompare(b))
+        .sort(([left], [right]) => compareRetailUtf8(left, right))
         .map(([key, entry]) => [key, canonicalize(entry)]),
     )
   }
@@ -129,6 +134,8 @@ const canonicalize = (value: unknown): unknown => {
 }
 
 const serializedBytes = (value: unknown): number => new TextEncoder().encode(JSON.stringify(value)).byteLength
+const canonicalSerializedBytes = (value: unknown): number =>
+  new TextEncoder().encode(JSON.stringify(canonicalize(value))).byteLength
 
 interface CandidateProductRecord {
   fields: Product
@@ -313,7 +320,19 @@ export class RetailReplicaSimulator {
         inventoryDeltas: states[id].inventoryDeltas,
       })),
     )
-    const finalStateBytes = Object.fromEntries(REPLICAS.map((id) => [id, serializedBytes(states[id])])) as Record<RetailReplicaId, number>
+    const protocolStates = REPLICAS.map((id) =>
+      JSON.stringify(
+        canonicalize({
+          products: states[id].products,
+          categories: states[id].categories,
+          inventoryDeltas: states[id].inventoryDeltas,
+          appliedOperationIds: states[id].appliedOperationIds,
+        }),
+      ),
+    )
+    const finalStateBytes = Object.fromEntries(
+      REPLICAS.map((id) => [id, canonicalSerializedBytes(states[id])]),
+    ) as Record<RetailReplicaId, number>
     const finalMetadataCounts = Object.fromEntries(REPLICAS.map((id) => [id, states[id].appliedOperationIds.length])) as Record<RetailReplicaId, number>
     const deliveries = this.events.filter((event) => event.type === 'delivered' || event.type === 'duplicate').length
     const duplicateDeliveries = this.events.filter((event) => event.type === 'duplicate' && event.detail === 'already-applied').length
@@ -335,6 +354,7 @@ export class RetailReplicaSimulator {
           .reduce((total, event) => total + serializedBytes(this.findGenerated(event.operationId!)), 0),
         finalStateBytes,
         finalMetadataCounts,
+        protocolStateConverged: protocolStates.every((state) => state === protocolStates[0]),
         converged: canonicalStates.every((state) => state === canonicalStates[0]),
       },
     }
