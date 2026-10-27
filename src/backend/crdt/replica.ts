@@ -70,6 +70,10 @@ export class ReplicaRuntime<T extends string> {
     return this.counter.decrement(delta)
   }
 
+  garbageCollect(membership: readonly string[]) {
+    return this.set.garbageCollect(membership)
+  }
+
   merge(other: ReplicaRuntime<T>): void {
     const mergedClock = this.clock.merge(other.clock)
 
@@ -115,7 +119,7 @@ export class ReplicaRuntime<T extends string> {
 
     runtime.register.restore(restoredRegister)
 
-    runtime.set.merge(OrSet.fromJSON<T>(snapshot.replicaId, snapshot.set))
+    runtime.set.restore(snapshot.set)
 
     runtime.counter.merge(
       PnCounter.fromJSON(snapshot.replicaId, snapshot.counter),

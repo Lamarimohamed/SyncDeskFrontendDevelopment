@@ -60,6 +60,54 @@ describe("deterministic replica simulator", () => {
     expect(run()).toEqual(run())
   })
 
+  it("collects stable tombstones across all replicas without breaking convergence", () => {
+    const simulator = new ReplicaSimulator<string>(3, ["a", "b", "c"])
+
+    simulator.update("a", (replica) => replica.add("red"))
+    simulator.update("b", (replica) => replica.add("blue"))
+
+    for (const from of simulator.replicaIds) {
+      for (const target of simulator.replicaIds) {
+        if (from !== target) simulator.send(from, target)
+      }
+    }
+
+    simulator.deliverAll()
+
+    simulator.update("a", (replica) => {
+      replica.remove("red")
+    })
+
+    for (const from of simulator.replicaIds) {
+      for (const target of simulator.replicaIds) {
+        if (from !== target) simulator.send(from, target)
+      }
+    }
+
+    simulator.deliverAll()
+
+    expect(simulator.converge()).toBe(true)
+
+    const collected = simulator.collectGarbage()
+
+    expect(collected.a.tombstonesCollected).toBeGreaterThan(0)
+    expect(collected.b.tombstonesCollected).toBeGreaterThan(0)
+    expect(collected.c.tombstonesCollected).toBeGreaterThan(0)
+    expect(simulator.converge()).toBe(true)
+
+    // A post-collection exchange round must not resurrect collected elements.
+    for (const from of simulator.replicaIds) {
+      for (const target of simulator.replicaIds) {
+        if (from !== target) simulator.send(from, target)
+      }
+    }
+
+    simulator.deliverAll()
+
+    expect(simulator.converge()).toBe(true)
+    expect(simulator.report(3).snapshots.a.set.removes).toEqual({})
+  })
+
   it("does not claim convergence while a partition prevents exchange", () => {
     const simulator = new ReplicaSimulator<string>(1, ["a", "b"])
 

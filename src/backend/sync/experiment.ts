@@ -145,12 +145,20 @@ export const runExperiment = <T extends string,>(
 
     const report = simulator.report(config.seed)
 
+    // Hashes compare the replicated semantic state; OR-Set observation
+    // matrices and add-counter watermarks are per-replica bookkeeping.
+    const semanticSet = (set: (typeof report.snapshots)[string]["set"]) => ({
+      adds: set.adds,
+      removes: set.removes,
+      removeVector: set.removeVector,
+    })
+
     const stateHashes = Object.fromEntries(
       replicaIds.map((id) => [
         id,
         hash({
           register: report.snapshots[id].register,
-          set: report.snapshots[id].set,
+          set: semanticSet(report.snapshots[id].set),
           counter: report.snapshots[id].counter,
         }),
       ]),

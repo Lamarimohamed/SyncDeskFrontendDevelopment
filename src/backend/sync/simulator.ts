@@ -7,7 +7,7 @@ import {
 import { ReplicaRuntime, type ReplicaSnapshot } from "../crdt/replica"
 
 export interface SimulatorEvent {
-  type: "update" | "send" | "deliver" | "drop" | "duplicate" | "restart"
+  type: "update" | "send" | "deliver" | "drop" | "duplicate" | "restart" | "gc"
 
   replicaId?: string
 
@@ -232,14 +232,43 @@ export class ReplicaSimulator<T extends string> {
     this.events.push({ type: "restart", replicaId })
   }
 
+  collectGarbage(): Record<
+    string,
+    { tombstonesCollected: number; tagsCollected: number }
+  > {
+    const collected: Record<
+      string,
+      { tombstonesCollected: number; tagsCollected: number }
+    > = {}
+
+    for (const replicaId of this.replicas.keys()) {
+      collected[replicaId] = this.requireReplica(replicaId).garbageCollect([
+        ...this.replicas.keys(),
+      ])
+
+      this.events.push({ type: "gc", replicaId })
+    }
+
+    return collected
+  }
+
   converge(): boolean {
     const snapshots = this.replicaIds.map((id) => {
       const snapshot = this.requireReplica(id).snapshot()
 
+      // Convergence compares the replicated semantic state. OR-Set
+      // observation matrices and add-counter watermarks are per-replica
+      // bookkeeping and are expected to differ between replicas.
+      const set = snapshot.set
+
       return JSON.stringify(
         canonicalize({
           register: snapshot.register,
-          set: snapshot.set,
+          set: {
+            adds: set.adds,
+            removes: set.removes,
+            removeVector: set.removeVector,
+          },
           counter: snapshot.counter,
         }),
       )
