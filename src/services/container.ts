@@ -8,6 +8,7 @@ import { MockRepository } from '@/repositories/MockRepository'
 import type { Repository } from '@/repositories/Repository'
 import { SyncService } from './syncService'
 import { BackendApiClient } from './backendApi'
+import { wireBrowserConnectivity } from './connectivity/browserConnectivity'
 import { logger } from '@/lib/logger'
 
 const storage = browserStorage('local')
@@ -34,6 +35,7 @@ export const authService = new LocalAuthService({
 })
 
 engine.start()
+wireBrowserConnectivity(engine)
 
 if (backendClient) {
   void backendClient

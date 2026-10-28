@@ -19,7 +19,7 @@ export const preferencesStore = createPersistedStore<Preferences>('syncdesk.pref
   reducedMotion: false,
   direction: 'ltr',
   autoSync: true,
-  autoRetry: false,
+  autoRetry: true,
   diagnosticsOpenByDefault: false,
   technicalMode: false,
   showDevControls: true,
