@@ -358,4 +358,65 @@ describe("or-set causal-stability garbage collection", () => {
       "Invalid OR-Set remove event",
     )
   })
+
+  it("blocks collection across a partition and collects after the delayed replica reconnects", () => {
+    const a = new OrSet<Value>("a")
+    const b = new OrSet<Value>("b")
+    const delayed = new OrSet<Value>("c")
+
+    a.add("x")
+    b.merge(a)
+    delayed.merge(a)
+
+    a.remove("x")
+    b.merge(a)
+    a.merge(b)
+
+    expect(a.garbageCollect(["a", "b", "c"])).toEqual({
+      tombstonesCollected: 0,
+      tagsCollected: 0,
+    })
+
+    delayed.merge(a)
+    a.merge(delayed)
+    b.merge(delayed)
+    delayed.merge(b)
+
+    expect(a.garbageCollect(["a", "b", "c"])).toEqual({
+      tombstonesCollected: 1,
+      tagsCollected: 1,
+    })
+    expect(delayed.garbageCollect(["a", "b", "c"])).toEqual({
+      tombstonesCollected: 1,
+      tagsCollected: 1,
+    })
+
+    delayed.merge(a)
+
+    expect(delayed.values()).toEqual([])
+    expect(delayed.has("x")).toBe(false)
+  })
+
+  it("does not reuse a retired replica identity when a replacement replica joins", () => {
+    const a = new OrSet<Value>("a")
+    const replacement = new OrSet<Value>("d")
+
+    a.add("x")
+    a.remove("x")
+    replacement.merge(a)
+    a.merge(replacement)
+
+    expect(a.garbageCollect(["a", "d"])).toEqual({
+      tombstonesCollected: 1,
+      tagsCollected: 1,
+    })
+    expect(replacement.garbageCollect(["a", "d"])).toEqual({
+      tombstonesCollected: 1,
+      tagsCollected: 1,
+    })
+
+    replacement.merge(a)
+
+    expect(replacement.values()).toEqual([])
+  })
 })

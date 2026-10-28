@@ -56,6 +56,11 @@ export interface ReceiveResult<T extends string> {
   replica: ReplicaRuntime<T>
 }
 
+// Applied-message identifiers are retained for the lifetime of the endpoint.
+// They are a duplicate-delivery guard for full-state snapshots, not OR-Set
+// tombstones. Collecting an identifier would make a later retransmission look
+// new and could re-merge a stale snapshot after tombstone GC. No GC of this
+// set is performed.
 export class ReliableSyncEndpoint<T extends string> {
   private readonly appliedMessageIds = new Set<string>()
 

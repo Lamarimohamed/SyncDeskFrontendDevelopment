@@ -1,0 +1,21 @@
+{
+  "matrixVersion": "orset-gc-1",
+  "metricSchemaVersion": "orset-gc-metrics-1",
+  "scenarioIds": [
+    "online-no-gc",
+    "online-gc",
+    "delayed-replica-no-gc",
+    "delayed-replica-gc"
+  ],
+  "seeds": [
+    11,
+    23,
+    37,
+    101,
+    202
+  ],
+  "replicaCount": 4,
+  "operationsPerReplica": 24,
+  "rounds": 4,
+  "deleteRatio": 0.85
+}

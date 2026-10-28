@@ -1,0 +1,8 @@
+{
+  "artifactSchemaVersion": 1,
+  "matrixVersion": "orset-gc-1",
+  "metricSchemaVersion": "orset-gc-metrics-1",
+  "recordCount": 20,
+  "configurationHash": "cbcbcdf7985a3d7d9ddaa5bc82132e49d6fa6ffba83149c19edaeee062653e26",
+  "complete": true
+}

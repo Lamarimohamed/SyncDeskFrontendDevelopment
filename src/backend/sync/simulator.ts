@@ -4,10 +4,22 @@ import {
   type StateSyncMessage,
 } from "./protocol"
 
+import { ReplicaMembership } from "../crdt/membership"
+
 import { ReplicaRuntime, type ReplicaSnapshot } from "../crdt/replica"
 
 export interface SimulatorEvent {
-  type: "update" | "send" | "deliver" | "drop" | "duplicate" | "restart" | "gc"
+  type:
+    | "update"
+    | "send"
+    | "deliver"
+    | "drop"
+    | "duplicate"
+    | "restart"
+    | "gc"
+    | "forget"
+    | "join"
+    | "reject"
 
   replicaId?: string
 
@@ -64,6 +76,8 @@ export class ReplicaSimulator<T extends string> {
 
   private readonly replicas = new Map<string, ReplicaRuntime<T>>()
 
+  private readonly membership: ReplicaMembership
+
   private readonly partitions = new Set<string>()
 
   private readonly queue: QueuedMessage<T>[] = []
@@ -88,11 +102,17 @@ export class ReplicaSimulator<T extends string> {
 
     this.random = new DeterministicRandom(seed >>> 0)
 
+    this.membership = new ReplicaMembership(replicaIds)
+
     replicaIds.forEach((id) => this.replicas.set(id, new ReplicaRuntime<T>(id)))
   }
 
   get replicaIds(): string[] {
     return [...this.replicas.keys()]
+  }
+
+  get membershipIds(): string[] {
+    return this.membership.list()
   }
 
   update(
@@ -125,6 +145,20 @@ export class ReplicaSimulator<T extends string> {
     this.requireReplica(fromReplicaId)
 
     this.requireReplica(targetReplicaId)
+
+    if (
+      !this.membership.includes(fromReplicaId) ||
+      !this.membership.includes(targetReplicaId)
+    ) {
+      this.events.push({
+        type: "reject",
+        replicaId: fromReplicaId,
+        targetReplicaId,
+        detail: "retired-membership",
+      })
+
+      return
+    }
 
     if (
       this.partitions.has(fromReplicaId) ||
@@ -206,6 +240,21 @@ export class ReplicaSimulator<T extends string> {
 
     this.virtualTime = Math.max(this.virtualTime, queued.deliverAt)
 
+    if (
+      !this.membership.includes(queued.message.fromReplicaId) ||
+      !this.membership.includes(queued.target)
+    ) {
+      this.events.push({
+        type: "reject",
+        replicaId: queued.message.fromReplicaId,
+        targetReplicaId: queued.target,
+        messageId: queued.message.messageId,
+        detail: "retired-membership",
+      })
+
+      return true
+    }
+
     const target = this.requireReplica(queued.target)
 
     target.merge(ReplicaRuntime.fromJSON(queued.message.snapshot))
@@ -232,6 +281,42 @@ export class ReplicaSimulator<T extends string> {
     this.events.push({ type: "restart", replicaId })
   }
 
+  fullMesh(faults: NetworkFaults = {}): void {
+    for (const from of this.membershipIds) {
+      for (const target of this.membershipIds) {
+        if (from !== target) this.send(from, target, faults)
+      }
+    }
+  }
+
+  forgetReplica(replicaId: string): void {
+    this.requireReplica(replicaId)
+
+    this.membership.forget(replicaId)
+
+    this.partitions.delete(replicaId)
+
+    for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+      const queued = this.queue[index]
+
+      if (
+        queued.message.fromReplicaId === replicaId ||
+        queued.target === replicaId
+      )
+        this.queue.splice(index, 1)
+    }
+
+    this.events.push({ type: "forget", replicaId })
+  }
+
+  joinReplica(replicaId: string): void {
+    this.membership.join(replicaId)
+
+    this.replicas.set(replicaId, new ReplicaRuntime<T>(replicaId))
+
+    this.events.push({ type: "join", replicaId })
+  }
+
   collectGarbage(): Record<
     string,
     { tombstonesCollected: number; tagsCollected: number }
@@ -241,10 +326,12 @@ export class ReplicaSimulator<T extends string> {
       { tombstonesCollected: number; tagsCollected: number }
     > = {}
 
-    for (const replicaId of this.replicas.keys()) {
-      collected[replicaId] = this.requireReplica(replicaId).garbageCollect([
-        ...this.replicas.keys(),
-      ])
+    const membership = this.membershipIds
+
+    for (const replicaId of membership) {
+      collected[replicaId] = this.requireReplica(replicaId).garbageCollect(
+        membership,
+      )
 
       this.events.push({ type: "gc", replicaId })
     }
@@ -253,7 +340,7 @@ export class ReplicaSimulator<T extends string> {
   }
 
   converge(): boolean {
-    const snapshots = this.replicaIds.map((id) => {
+    const snapshots = this.membershipIds.map((id) => {
       const snapshot = this.requireReplica(id).snapshot()
 
       // Convergence compares the replicated semantic state. OR-Set

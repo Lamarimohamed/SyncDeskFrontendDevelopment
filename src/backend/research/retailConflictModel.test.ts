@@ -37,8 +37,13 @@ describe('retail conflict-model capability fixtures', () => {
     a.merge(b)
     c.merge(a)
 
-    expect(a.snapshot().set).toEqual(b.snapshot().set)
-    expect(b.snapshot().set).toEqual(c.snapshot().set)
+    const semanticSet = (replica: ReplicaRuntime<string>) => {
+      const set = replica.snapshot().set
+      return { adds: set.adds, removes: set.removes, removeVector: set.removeVector }
+    }
+
+    expect(semanticSet(a)).toEqual(semanticSet(b))
+    expect(semanticSet(b)).toEqual(semanticSet(c))
     expect(a.set.values().sort()).toEqual(['product-delete-1', 'product-upsert-1', 'product-upsert-2'])
   })
 

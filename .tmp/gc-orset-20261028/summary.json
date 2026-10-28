@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "matrixVersion": "orset-gc-1",
+  "metricSchemaVersion": "orset-gc-metrics-1",
+  "groups": [
+    {
+      "scenarioId": "online-no-gc",
+      "garbageCollect": false,
+      "runs": 5,
+      "convergedRuns": 5,
+      "failedRuns": 0,
+      "resurrectionRuns": 0,
+      "meanTombstoneSizeBytes": 114397.6,
+      "meanMetadataSizeBytes": 185121.6,
+      "meanTombstonesCollected": 0,
+      "meanEncodedPayloadBytes": 3528912
+    },
+    {
+      "scenarioId": "online-gc",
+      "garbageCollect": true,
+      "runs": 5,
+      "convergedRuns": 5,
+      "failedRuns": 0,
+      "resurrectionRuns": 0,
+      "meanTombstoneSizeBytes": 8,
+      "meanMetadataSizeBytes": 12514.4,
+      "meanTombstonesCollected": 1280,
+      "meanEncodedPayloadBytes": 1029782.4
+    },
+    {
+      "scenarioId": "delayed-replica-no-gc",
+      "garbageCollect": false,
+      "runs": 5,
+      "convergedRuns": 5,
+      "failedRuns": 0,
+      "resurrectionRuns": 0,
+      "meanTombstoneSizeBytes": 100063.2,
+      "meanMetadataSizeBytes": 162035.2,
+      "meanTombstonesCollected": 0,
+      "meanEncodedPayloadBytes": 2665543.8
+    },
+    {
+      "scenarioId": "delayed-replica-gc",
+      "garbageCollect": true,
+      "runs": 5,
+      "convergedRuns": 5,
+      "failedRuns": 0,
+      "resurrectionRuns": 0,
+      "meanTombstoneSizeBytes": 8,
+      "meanMetadataSizeBytes": 11056.8,
+      "meanTombstonesCollected": 1120,
+      "meanEncodedPayloadBytes": 1190839.8
+    }
+  ]
+}
