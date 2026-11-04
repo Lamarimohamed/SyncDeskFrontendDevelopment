@@ -45,6 +45,17 @@ operations in reverse order with duplicates during reconnect. Metadata hashes
 are reported separately because each server's CRDT bookkeeping has a distinct
 replica identity; they are not silently treated as equal.
 
+Workloads can also be configured from JSON:
+
+```text
+$env:EXPERIMENT_CONFIG="docs/distributed-experiment.config.example.json"
+npm run distributed:experiment
+```
+
+The output marks bandwidth overhead and persistent storage size as `null`
+because those transport and filesystem measurements are not available at the
+application boundary.
+
 ## Fault injection and restart
 
 The Compose network is named `syncdesk`. A complete network fault can be

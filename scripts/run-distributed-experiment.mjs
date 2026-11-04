@@ -1,16 +1,22 @@
-import { mkdir, writeFile } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname } from "node:path"
 import { createHash } from "node:crypto"
 
-const urls = (process.env.REPLICA_URLS ?? "http://127.0.0.1:8787")
+const configPath = process.env.EXPERIMENT_CONFIG
+const fileConfig = configPath
+  ? JSON.parse(await readFile(configPath, "utf8"))
+  : {}
+const urls = (fileConfig.replicaUrls?.join(",") ?? process.env.REPLICA_URLS ?? "http://127.0.0.1:8787")
   .split(",")
   .map((url) => url.trim().replace(/\/+$/, ""))
   .filter(Boolean)
 const outputPath = process.env.EXPERIMENT_OUTPUT ?? ".tmp/distributed-experiment.json"
-const seed = Number.parseInt(process.env.EXPERIMENT_SEED ?? "20261103", 10)
+const seed = Number.parseInt(String(fileConfig.seed ?? process.env.EXPERIMENT_SEED ?? "20261103"), 10)
+const operationsPerReplica = fileConfig.operationsPerReplica ?? 1
 const startedAt = Date.now()
 
-if (!urls.length || !Number.isInteger(seed)) throw new Error("REPLICA_URLS and EXPERIMENT_SEED are required")
+if (!urls.length || !Number.isInteger(seed) || !Number.isInteger(operationsPerReplica) || operationsPerReplica < 1)
+  throw new Error("Replica URLs, seed, and a positive operationsPerReplica are required")
 
 const request = async (url, path, options = {}) => {
   const response = await fetch(`${url}${path}`, {
@@ -36,11 +42,13 @@ const product = (replicaIndex, operationIndex) => ({
   updatedAt: seed + replicaIndex * 100 + operationIndex,
 })
 
-const operations = urls.map((_, replicaIndex) => ({
-  operationId: `run-${seed}-replica-${replicaIndex}`,
-  kind: "product.upsert",
-  product: product(replicaIndex, 0),
-}))
+const operations = urls.flatMap((_, replicaIndex) =>
+  Array.from({ length: operationsPerReplica }, (_, operationIndex) => ({
+    operationId: `run-${seed}-replica-${replicaIndex}-operation-${operationIndex}`,
+    kind: "product.upsert",
+    product: product(replicaIndex, operationIndex),
+  })),
+)
 const deletion = {
   operationId: `run-${seed}-delete-replica-0`,
   kind: "product.delete",
@@ -53,10 +61,13 @@ for (const url of urls) await request(url, "/health")
 
 // The first phase intentionally withholds fanout, representing an application-level
 // partition while each independent backend accepts a local write.
-for (let index = 0; index < urls.length; index += 1) {
-  await request(urls[index], "/v1/retail/operations", {
+for (let replicaIndex = 0; replicaIndex < urls.length; replicaIndex += 1) {
+  const localOperations = operations.filter((_, index) =>
+    Math.floor(index / operationsPerReplica) === replicaIndex
+  )
+  await request(urls[replicaIndex], "/v1/retail/operations", {
     method: "POST",
-    body: JSON.stringify({ operations: [workload[index]] }),
+    body: JSON.stringify({ operations: localOperations }),
   })
 }
 
@@ -108,14 +119,24 @@ const result = {
   seed,
   replicaIds: catalogs.map((entry) => entry.replicaId),
   scenario: "partition-local-writes-reordered-duplicate-reconnect",
+  configuration: {
+    replicaCount: urls.length,
+    operationsPerReplica,
+    operationDistribution: "one partition-local batch per replica",
+    faultSchedule: ["withhold fanout", "reverse-order replay", "duplicate replay", "delete replay"],
+  },
   startedAt: new Date(startedAt).toISOString(),
   finishedAt: new Date(finishedAt).toISOString(),
-  convergenceTimeMs: converged ? finishedAt - startedAt : null,
+  experimentDurationMs: finishedAt - startedAt,
+  convergenceTimeMs: converged && semanticCorrect && operationsCorrect ? finishedAt - startedAt : null,
+  recoveryTimeMs: converged ? finishedAt - startedAt : null,
   operationsGenerated: workload.length,
   operationsTransmitted: transmitted,
   operationsApplied: applied,
   operationsDeduplicated: deduplicated,
   applicationPayloadBytes: Buffer.byteLength(JSON.stringify({ operations: workload })),
+  bandwidthOverheadBytes: null,
+  persistentStorageBytes: null,
   stateBytes: normalizedCatalogs.reduce((total, catalog) => total + Buffer.byteLength(JSON.stringify(catalog)), 0),
   stateHash: createHash("sha256").update(canonical).digest("hex"),
   metadataStateHashes,
@@ -129,4 +150,4 @@ const result = {
 await mkdir(dirname(outputPath), { recursive: true })
 await writeFile(outputPath, `${JSON.stringify(result, null, 2)}\n`, "utf8")
 process.stdout.write(`${JSON.stringify(result)}\n`)
-if (!converged) process.exitCode = 1
+if (!result.finalCorrectness) process.exitCode = 1

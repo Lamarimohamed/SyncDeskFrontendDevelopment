@@ -54,3 +54,12 @@ event. Existing tests cover delayed members, concurrent re-adds, restart
 watermarks, merge-order convergence, and no resurrection after collection.
 The Docker retail endpoint does not expose OR-Set GC as a production catalog
 operation, so no Docker GC metric is claimed.
+
+## Non-Docker evidence
+
+The application test suite currently passes with 29 test files and 186 tests,
+and TypeScript typechecking passes. The local process-level runner has also
+validated unique replica identities, complete catalog convergence, deletion
+semantics, duplicate suppression, operation preservation, and recovery from the
+same persisted store. These results do not substitute for Docker Engine
+validation.
