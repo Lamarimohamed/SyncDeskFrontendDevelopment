@@ -156,7 +156,7 @@ class PersistenceError extends Error {}
 export const createBackendServer = (
   options: BackendServerOptions = {},
 ): BackendServer => {
-  const replicaId = options.replicaId ?? "backend-replica"
+  const replicaId = options.replicaId ?? process.env.BACKEND_REPLICA_ID ?? "backend-replica"
   if (!replicaId) throw new Error("Backend replica identity is required")
 
   const store = options.store ?? createStoreFromEnvironment()
@@ -219,6 +219,14 @@ export const createBackendServer = (
       json(response, 200, {
         catalog: retailRuntime.getCatalog(),
         replicaId,
+      })
+      return
+    }
+
+    if (method === "GET" && path === "/v1/retail/state") {
+      json(response, 200, {
+        replicaId,
+        ...retailRuntime.snapshot(),
       })
       return
     }

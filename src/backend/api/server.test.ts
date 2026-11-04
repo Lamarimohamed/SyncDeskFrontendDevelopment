@@ -88,6 +88,13 @@ describe("backend HTTP API", () => {
         snapshot: { set: { adds: { café: [{ replicaId: "source", counter: 1 }] } } },
         persisted: true,
       })
+
+      const retailState = await httpRequest(backend.port, "GET", "/v1/retail/state")
+      expect(retailState.body).toMatchObject({
+        replicaId: "backend-replica",
+        catalog: { products: [], categories: [] },
+        appliedOperationIds: [],
+      })
     } finally {
       await backend.close()
     }

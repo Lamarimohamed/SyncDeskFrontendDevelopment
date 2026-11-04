@@ -1,0 +1,88 @@
+services:
+  replica-a:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8787
+      BACKEND_REPLICA_ID: replica-a
+      BACKEND_STORE_PATH: /var/lib/syncdesk/replica.json
+      BACKEND_CORS_ORIGIN: "*"
+    command: ["pnpm", "backend"]
+    volumes:
+      - replica-a-data:/var/lib/syncdesk
+    networks: [syncdesk]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  replica-b:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8787
+      BACKEND_REPLICA_ID: replica-b
+      BACKEND_STORE_PATH: /var/lib/syncdesk/replica.json
+      BACKEND_CORS_ORIGIN: "*"
+    command: ["pnpm", "backend"]
+    volumes:
+      - replica-b-data:/var/lib/syncdesk
+    networks: [syncdesk]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  replica-c:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8787
+      BACKEND_REPLICA_ID: replica-c
+      BACKEND_STORE_PATH: /var/lib/syncdesk/replica.json
+      BACKEND_CORS_ORIGIN: "*"
+    command: ["pnpm", "backend"]
+    volumes:
+      - replica-c-data:/var/lib/syncdesk
+    networks: [syncdesk]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  experiment-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      REPLICA_URLS: http://replica-a:8787,http://replica-b:8787,http://replica-c:8787
+      EXPERIMENT_OUTPUT: /results/distributed-experiment.json
+      EXPERIMENT_SEED: ${EXPERIMENT_SEED:-20261103}
+    command: ["node", "scripts/run-distributed-experiment.mjs"]
+    depends_on:
+      replica-a: { condition: service_healthy }
+      replica-b: { condition: service_healthy }
+      replica-c: { condition: service_healthy }
+    volumes:
+      - experiment-results:/results
+    networks: [syncdesk]
+
+networks:
+  syncdesk:
+    name: syncdesk
+    driver: bridge
+
+volumes:
+  replica-a-data:
+  replica-b-data:
+  replica-c-data:
+  experiment-results:
