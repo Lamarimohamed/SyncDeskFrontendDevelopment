@@ -129,7 +129,7 @@ const result = {
   finishedAt: new Date(finishedAt).toISOString(),
   experimentDurationMs: finishedAt - startedAt,
   convergenceTimeMs: converged && semanticCorrect && operationsCorrect ? finishedAt - startedAt : null,
-  recoveryTimeMs: converged ? finishedAt - startedAt : null,
+  recoveryTimeMs: null,
   operationsGenerated: workload.length,
   operationsTransmitted: transmitted,
   operationsApplied: applied,

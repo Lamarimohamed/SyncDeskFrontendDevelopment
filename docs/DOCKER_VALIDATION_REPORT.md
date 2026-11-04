@@ -63,3 +63,7 @@ validated unique replica identities, complete catalog convergence, deletion
 semantics, duplicate suppression, operation preservation, and recovery from the
 same persisted store. These results do not substitute for Docker Engine
 validation.
+
+The runner reports recovery time as `null` because its process-level scenario
+does not stop and restart a replica; restart recovery is only measured by the
+Docker validation script when Docker is available.
