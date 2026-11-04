@@ -2,7 +2,7 @@
 
 ## Repository audit
 
-- Expected baseline: `fd8fb5a`; the validation session must verify `git rev-parse
+- Expected baseline: `97628a3`; the validation session must verify `git rev-parse
   HEAD` before execution.
 - The backend accepts `BACKEND_REPLICA_ID`, persists the generic and retail
   records through `FileReplicaStore`, and uses atomic temporary-file replacement
@@ -18,7 +18,9 @@ Docker was not available in the validation environment. The commands
 `docker --version` and `docker compose version` failed with PowerShell's
 `docker : The term 'docker' is not recognized` error. Therefore no Docker
 build, container startup, health check, restart, network disconnect, or Compose
-log result is claimed here.
+log result is claimed here. The exact validation command
+`npm run distributed:validate` was also executed and stopped at
+`scripts/validate-docker.ps1:3` for the same reason.
 
 Run the complete external validation from the repository root on a host with
 Docker Engine and Compose:
@@ -67,3 +69,32 @@ validation.
 The runner reports recovery time as `null` because its process-level scenario
 does not stop and restart a replica; restart recovery is only measured by the
 Docker validation script when Docker is available.
+
+Each result records `softwareVersion` and `gitCommit`. If the configured output
+path already exists, the runner writes a run-ID-suffixed file instead of
+overwriting the previous result.
+
+## Actual local process run
+
+Using Node.js `v24.21.0`, seed `20261103`, configuration
+`docs/distributed-experiment.config.example.json`, and commit
+`97628a32181f25bf9bf9e7c90e68b0edf12f927d`, the three-process runner completed
+successfully:
+
+- replicas: `replica-a`, `replica-b`, `replica-c`
+- operations generated: `4`
+- operations transmitted: `24`
+- operations applied: `9`
+- operations deduplicated: `15`
+- experiment/convergence time: `194 ms`
+- semantic correctness: `true`
+- operation preservation: `true`
+- final correctness: `true`
+- application payload bytes: `1304`
+- state bytes: `1926`
+- bandwidth overhead: `null`
+- persistent storage bytes: `null`
+
+This is process-level HTTP evidence, not Docker evidence. The raw output was
+inspected and temporary local output was removed; no experimental result was
+overwritten.

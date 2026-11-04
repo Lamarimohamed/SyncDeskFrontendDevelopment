@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { access, mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname } from "node:path"
 import { createHash } from "node:crypto"
 
@@ -11,6 +11,8 @@ const urls = (fileConfig.replicaUrls?.join(",") ?? process.env.REPLICA_URLS ?? "
   .map((url) => url.trim().replace(/\/+$/, ""))
   .filter(Boolean)
 const outputPath = process.env.EXPERIMENT_OUTPUT ?? ".tmp/distributed-experiment.json"
+const softwareVersion = JSON.parse(await readFile("package.json", "utf8")).version
+const gitCommit = process.env.GIT_COMMIT ?? "unknown"
 const seed = Number.parseInt(String(fileConfig.seed ?? process.env.EXPERIMENT_SEED ?? "20261103"), 10)
 const operationsPerReplica = fileConfig.operationsPerReplica ?? 1
 const startedAt = Date.now()
@@ -115,6 +117,8 @@ const metadataConverged = metadataStateHashes.every((hash) => hash === metadataS
 const finishedAt = Date.now()
 const result = {
   schemaVersion: 1,
+  softwareVersion,
+  gitCommit,
   runId: `distributed-${seed}-${startedAt}`,
   seed,
   replicaIds: catalogs.map((entry) => entry.replicaId),
@@ -148,6 +152,13 @@ const result = {
 }
 
 await mkdir(dirname(outputPath), { recursive: true })
-await writeFile(outputPath, `${JSON.stringify(result, null, 2)}\n`, "utf8")
+let resultPath = outputPath
+try {
+  await access(resultPath)
+  resultPath = `${outputPath}.${result.runId}.json`
+} catch {
+  // The configured output path is available.
+}
+await writeFile(resultPath, `${JSON.stringify({ ...result, resultPath }, null, 2)}\n`, "utf8")
 process.stdout.write(`${JSON.stringify(result)}\n`)
 if (!result.finalCorrectness) process.exitCode = 1

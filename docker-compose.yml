@@ -67,6 +67,7 @@ services:
       REPLICA_URLS: http://replica-a:8787,http://replica-b:8787,http://replica-c:8787
       EXPERIMENT_OUTPUT: /results/distributed-experiment.json
       EXPERIMENT_SEED: ${EXPERIMENT_SEED:-20261103}
+      GIT_COMMIT: ${GIT_COMMIT:-unknown}
     command: ["node", "scripts/run-distributed-experiment.mjs"]
     depends_on:
       replica-a: { condition: service_healthy }
