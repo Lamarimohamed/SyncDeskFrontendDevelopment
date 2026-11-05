@@ -5,6 +5,9 @@ import { resolve } from "node:path"
 import { ReplicaRuntime, type ReplicaSnapshot } from "../crdt/replica"
 import { FileReplicaStore, ReplicaStore, type ReplicaRecord } from "../persistence/ReplicaStore"
 import { ReliableSyncEndpoint } from "../sync/reliability"
+import { DurableOperationLog, type OperationLogState } from "../sync/operationLog"
+import { VersionedRetailRuntime } from "../sync/versionedRetailRuntime"
+import { validateVersionedRetailOperation, type VersionedRetailOperation } from "../../domain/retailSync"
 import { loadRetailRuntime, RetailDomainRuntime, validateRetailOperation } from "./retail"
 
 const API_VERSION = "1"
@@ -166,6 +169,13 @@ export const createBackendServer = (
 
   let endpoint = loadEndpoint(replicaId, store)
   let retailRuntime = loadRetailRuntime(replicaId, store)
+  const logRecordId = `${replicaId}:operation-log`
+  const log = DurableOperationLog.load({
+    load: (): OperationLogState | undefined => store.load(logRecordId)?.state as OperationLogState | undefined,
+    save: (state) => { store.save(logRecordId, state) },
+  })
+  const versionedRuntime = new VersionedRetailRuntime()
+  for (const entry of log.all()) versionedRuntime.apply(entry.operation)
   let requestChain = Promise.resolve()
   const corsOrigin = options.corsOrigin ?? process.env.BACKEND_CORS_ORIGIN ?? '*'
 
@@ -231,12 +241,65 @@ export const createBackendServer = (
       return
     }
 
+    if (method === "GET" && path === "/v1/sync/operations") {
+      const query = new URL(request.url ?? "", `http://${request.headers.host ?? "localhost"}`).searchParams
+      const cursor = Number(query.get("after") ?? "0")
+      const limit = Number(query.get("limit") ?? "100")
+      if (!Number.isSafeInteger(cursor) || cursor < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+        errorResponse(response, 400, "invalid_cursor", "Cursor must be a non-negative integer and limit must be 1..500")
+        return
+      }
+
+      json(response, 200, { ...log.after(cursor, limit), logSizeBytes: log.size() })
+      return
+    }
+
+    if (method === "GET" && path === "/v1/sync/catalog") {
+      json(response, 200, { replicaId, catalog: versionedRuntime.catalog(), appliedOperationIds: versionedRuntime.operationIds() })
+      return
+    }
+
+    if (method === "POST" && path === "/v1/sync/operations") {
+      requestChain = requestChain.then(async () => {
+        const body = await readJson(request, bodyLimit)
+        if (!isRecord(body) || !Array.isArray(body.operations) || body.operations.length === 0 || body.operations.length > 100) {
+          throw new HttpError(400, "invalid_operations", "Operations must contain 1..100 entries")
+        }
+        const results = body.operations.map((value) => {
+          const operation = validateVersionedRetailOperation(value)
+          const result = log.append(operation)
+          if (result.status === "accepted") versionedRuntime.apply(operation)
+          return { operationId: operation.operationId, ...result }
+        })
+        json(response, 200, { results, accepted: results.filter((result) => result.status === "accepted").length, persisted: true })
+      }).catch((error: unknown) => {
+        if (error instanceof HttpError) errorResponse(response, error.status, error.code, error.message)
+        else errorResponse(response, 400, "invalid_operation", error instanceof Error ? error.message : "The operation is invalid")
+      })
+      return
+    }
+
     if (method === "POST" && path === "/v1/retail/operations") {
       requestChain = requestChain
         .then(async () => {
           const body = await readJson(request, bodyLimit)
           if (!isRecord(body) || !Array.isArray(body.operations) || body.operations.length === 0) {
             throw new HttpError(400, "invalid_retail_operations", "Retail operations must be a non-empty array")
+          }
+          if (body.operations.every((operation) => isRecord(operation) && operation.schemaVersion === 2)) {
+            const results = body.operations.map((value) => {
+              const operation = validateVersionedRetailOperation(value)
+              const result = log.append(operation)
+              if (result.status === "accepted") versionedRuntime.apply(operation)
+              return { operationId: operation.operationId, ...result }
+            })
+            json(response, 200, {
+              results,
+              catalog: versionedRuntime.catalog(),
+              persistedAt: Date.now(),
+              sync: { cursor: log.after(0, 500).nextCursor, logSizeBytes: log.size() },
+            })
+            return
           }
           const candidate = new RetailDomainRuntime(
             ReplicaRuntime.fromJSON(retailRuntime.replica.snapshot()),

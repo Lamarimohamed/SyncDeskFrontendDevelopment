@@ -1,7 +1,7 @@
 import { ReplicaRuntime } from '@/backend/crdt/replica'
 import { createStateMessage, encodeSyncMessage, type StateSyncMessage } from '@/backend/sync/protocol'
 import type { PendingChange } from '@/domain/sync'
-import type { RetailCatalog, RetailOperation, RetailOperationResult } from '@/domain/retailSync'
+import type { RetailCatalog, RetailOperation, RetailOperationResult, VersionedRetailOperation } from '@/domain/retailSync'
 
 export interface BackendHealth {
   status: 'ok'
@@ -30,6 +30,19 @@ export interface BackendRetailResponse {
   results: RetailOperationResult[]
   catalog: RetailCatalog
   persistedAt: number
+}
+
+export interface SyncOperationResult {
+  operationId: string
+  status: 'accepted' | 'duplicate'
+  position: number
+}
+
+export interface SyncOperationPage {
+  operations: Array<{ position: number; operation: VersionedRetailOperation }>
+  nextCursor: number
+  hasMore: boolean
+  logSizeBytes: number
 }
 
 export class BackendApiError extends Error {
@@ -134,6 +147,19 @@ export class BackendApiClient {
       body: JSON.stringify({ operations }),
       headers: { 'content-type': 'application/json' },
     })
+  }
+
+  async pushVersionedOperations(operations: readonly VersionedRetailOperation[]): Promise<SyncOperationResult[]> {
+    const response = await this.request<{ results: SyncOperationResult[] }>('/v1/sync/operations', {
+      method: 'POST',
+      body: JSON.stringify({ operations }),
+      headers: { 'content-type': 'application/json' },
+    })
+    return response.results
+  }
+
+  async pullVersionedOperations(after = 0, limit = 100): Promise<SyncOperationPage> {
+    return this.request<SyncOperationPage>(`/v1/sync/operations?after=${after}&limit=${limit}`)
   }
 
   encodeChanges(replicaId: string, changes: readonly PendingChange[]): Uint8Array {

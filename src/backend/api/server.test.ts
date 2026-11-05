@@ -47,6 +47,95 @@ const httpRequest = (
   })
 
 describe("backend HTTP API", () => {
+  it("pushes, pages, deduplicates, and restores versioned operations", async () => {
+    const backend = await startBackendServer({ port: 0 })
+    const operation = {
+      schemaVersion: 2,
+      operationId: "versioned-1",
+      replicaId: "client-a",
+      version: { logicalTime: 1, replicaId: "client-a", operationId: "versioned-1" },
+      kind: "inventory.adjust",
+      productId: "p-coffee",
+      delta: 2,
+    }
+    try {
+      const pushed = await httpRequest(backend.port, "POST", "/v1/sync/operations", { operations: [operation] })
+      expect(pushed).toMatchObject({ status: 200, body: { results: [{ status: "accepted", position: 1 }] } })
+      const duplicate = await httpRequest(backend.port, "POST", "/v1/sync/operations", { operations: [operation] })
+      expect(duplicate).toMatchObject({ status: 200, body: { results: [{ status: "duplicate", position: 1 }] } })
+      const page = await httpRequest(backend.port, "GET", "/v1/sync/operations?after=0&limit=1")
+      expect(page).toMatchObject({ status: 200, body: { nextCursor: 1, hasMore: false, operations: [{ position: 1, operation }] } })
+    } finally {
+      await backend.close()
+    }
+  })
+
+  it("applies versioned retail operations through the CRDT path", async () => {
+    const backend = await startBackendServer({ port: 0 })
+    const restore = {
+      schemaVersion: 2,
+      operationId: "restore-1",
+      replicaId: "client-a",
+      version: { logicalTime: 1, replicaId: "client-a", operationId: "restore-1" },
+      kind: "product.restore",
+      productId: "p-crdt",
+      product: {
+        id: "p-crdt",
+        name: "CRDT product",
+        nameAr: "منتج",
+        description: "",
+        descriptionAr: "",
+        price: 10,
+        categoryId: "c",
+        availability: "available",
+        stock: 1,
+        lowStockThreshold: 1,
+        updatedAt: 1,
+      },
+    }
+    const patch = {
+      schemaVersion: 2,
+      operationId: "patch-1",
+      replicaId: "client-b",
+      version: { logicalTime: 2, replicaId: "client-b", operationId: "patch-1" },
+      kind: "product.patch",
+      productId: "p-crdt",
+      changes: { price: 25 },
+    }
+    try {
+      await httpRequest(backend.port, "POST", "/v1/retail/operations", { operations: [restore, patch] })
+      const state = await httpRequest(backend.port, "GET", "/v1/sync/catalog")
+      expect(state.body).toMatchObject({ catalog: { products: [{ id: "p-crdt", price: 25 }] } })
+    } finally {
+      await backend.close()
+    }
+  })
+
+  it("restores the operation log after server restart", async () => {
+    const store = new ReplicaStore()
+    const operation = {
+      schemaVersion: 2,
+      operationId: "restart-op",
+      replicaId: "client-a",
+      version: { logicalTime: 1, replicaId: "client-a", operationId: "restart-op" },
+      kind: "inventory.adjust",
+      productId: "p",
+      delta: 1,
+    }
+    const first = await startBackendServer({ port: 0, store, replicaId: "central" })
+    try {
+      await httpRequest(first.port, "POST", "/v1/sync/operations", { operations: [operation] })
+    } finally {
+      await first.close()
+    }
+    const restarted = await startBackendServer({ port: 0, store, replicaId: "central" })
+    try {
+      const page = await httpRequest(restarted.port, "GET", "/v1/sync/operations?after=0&limit=10")
+      expect(page.body).toMatchObject({ operations: [{ position: 1, operation }] })
+    } finally {
+      await restarted.close()
+    }
+  })
   it("reports health and an empty replica state", async () => {
     const backend = await startBackendServer({ port: 0 })
     try {
