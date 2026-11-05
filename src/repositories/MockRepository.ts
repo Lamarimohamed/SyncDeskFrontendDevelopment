@@ -1,7 +1,7 @@
 import { buildSeed, PEER_SEEDS, THIS_DEVICE_ID, type Seed } from '@/data/seed'
 import { stockLevel, adjustmentDelta, validateAdjustment, validateCategoryName, validateProduct } from '@/domain/rules'
 import type { ChangeDraft, RemoteChange, SyncSnapshot } from '@/domain/sync'
-import type { RetailCatalog } from '@/domain/retailSync'
+import { compareRetailVersions, type RetailCatalog, type RetailVersion, type VersionedRetailOperation } from '@/domain/retailSync'
 import {
   RepositoryError,
   ValidationError,
@@ -30,6 +30,14 @@ interface DataSet {
   adjustments: StockAdjustment[]
   /** Identifiers of removed products; kept so removals can propagate. */
   tombstones: string[]
+  versioned?: {
+    applied: string[]
+    productFields: Record<string, Record<string, RetailVersion>>
+    productTombstones: Record<string, RetailVersion>
+    productRestores: Record<string, RetailVersion>
+    categoryFields: Record<string, Record<string, RetailVersion>>
+    categoryTombstones: Record<string, RetailVersion>
+  }
 }
 
 const DATA_KEY = 'syncdesk.data.v1'
@@ -67,8 +75,10 @@ export class MockRepository implements Repository {
       adjustments: seed.adjustments,
       tombstones: [],
     }
+    this.data.versioned ??= { applied: [], productFields: {}, productTombstones: {}, productRestores: {}, categoryFields: {}, categoryTombstones: {} }
     engine.subscribe(() => this.emit())
     engine.setMergeHandler((change) => this.applyRemote(change))
+    engine.setVersionedOperationHandler((operation, source) => this.applyVersionedOperation(operation, source))
   }
 
   subscribe = (listener: () => void): (() => void) => {
@@ -182,7 +192,12 @@ export class MockRepository implements Repository {
           to: formatDA(input.price),
           crdt: 'LWW Register',
           discardable: true,
-          retailOperation: { operationId: nextId('retail'), kind: 'product.upsert', product: next },
+          retailOperation: {
+            operationId: nextId('retail'),
+            kind: 'product.patch',
+            productId: id,
+            changes: { price: input.price },
+          },
         })
       }
 
@@ -199,7 +214,12 @@ export class MockRepository implements Repository {
           field: 'details',
           crdt: 'LWW Register',
           discardable: false,
-          retailOperation: { operationId: nextId('retail'), kind: 'product.upsert', product: next },
+          retailOperation: {
+            operationId: nextId('retail'),
+            kind: 'product.patch',
+            productId: id,
+            changes: Object.fromEntries(changedDetails.map((field) => [field, input[field]])),
+          },
         })
       }
 
@@ -407,6 +427,100 @@ export class MockRepository implements Repository {
     this.engine.enqueue(draft)
   }
 
+  private applyVersionedOperation(operation: VersionedRetailOperation, source: 'local' | 'remote'): void {
+    const metadata = this.data.versioned!
+    if (metadata.applied.includes(operation.operationId)) return
+    metadata.applied.push(operation.operationId)
+    if (source === 'local') {
+      if (operation.kind === 'product.restore') {
+        metadata.productRestores[operation.productId] = operation.version
+        metadata.productFields[operation.productId] = Object.fromEntries(
+          Object.keys(operation.product).map((field) => [field, operation.version]),
+        )
+      }
+      if (operation.kind === 'product.delete') metadata.productTombstones[operation.productId] = operation.version
+      if (operation.kind === 'product.patch') {
+        const versions = metadata.productFields[operation.productId] ?? {}
+        for (const field of Object.keys(operation.changes)) versions[field] = operation.version
+        metadata.productFields[operation.productId] = versions
+      }
+      if (operation.kind === 'category.patch') {
+        const versions = metadata.categoryFields[operation.categoryId] ?? {}
+        for (const field of Object.keys(operation.changes)) versions[field] = operation.version
+        metadata.categoryFields[operation.categoryId] = versions
+      }
+      if (operation.kind === 'category.delete') metadata.categoryTombstones[operation.categoryId] = operation.version
+      this.commit()
+      return
+    }
+    if (operation.kind === 'product.restore') {
+      const currentRestore = metadata.productRestores[operation.productId]
+      const currentVersion = metadata.productTombstones[operation.productId]
+      if ((!currentRestore || compareRetailVersions(operation.version, currentRestore) > 0) &&
+          (!currentVersion || compareRetailVersions(operation.version, currentVersion) > 0)) {
+        this.data.products = [
+          operation.product,
+          ...this.data.products.filter((product) => product.id !== operation.productId),
+        ]
+        this.data.tombstones = this.data.tombstones.filter((id) => id !== operation.productId)
+        metadata.productRestores[operation.productId] = operation.version
+      }
+    } else if (operation.kind === 'product.delete') {
+      const currentVersion = metadata.productTombstones[operation.productId]
+      const restoreVersion = metadata.productRestores[operation.productId]
+      if ((!currentVersion || compareRetailVersions(operation.version, currentVersion) > 0) &&
+          (!restoreVersion || compareRetailVersions(operation.version, restoreVersion) > 0)) {
+        metadata.productTombstones[operation.productId] = operation.version
+        this.data.products = this.data.products.filter((product) => product.id !== operation.productId)
+        if (!this.data.tombstones.includes(operation.productId)) this.data.tombstones.push(operation.productId)
+      }
+    } else if (operation.kind === 'product.patch') {
+      const product = this.data.products.find((item) => item.id === operation.productId)
+      if (product && !metadata.productTombstones[operation.productId]) {
+        const versions = metadata.productFields[operation.productId] ?? {}
+        for (const [field, value] of Object.entries(operation.changes)) {
+          const restoreVersion = metadata.productRestores[operation.productId]
+          if ((!restoreVersion || compareRetailVersions(operation.version, restoreVersion) > 0) &&
+              (!versions[field] || compareRetailVersions(operation.version, versions[field]) > 0)) {
+            ;(product as unknown as Record<string, unknown>)[field] = value
+            versions[field] = operation.version
+          }
+        }
+        metadata.productFields[operation.productId] = versions
+      }
+    } else if (operation.kind === 'category.patch') {
+      const category = this.data.categories.find((item) => item.id === operation.categoryId)
+      if (!category && typeof operation.changes.name === 'string') {
+        this.data.categories.push({
+          id: operation.categoryId,
+          name: operation.changes.name,
+          nameAr: operation.changes.nameAr ?? '',
+          description: operation.changes.description ?? '',
+          updatedAt: operation.version.logicalTime,
+        })
+      } else if (category && (!metadata.categoryTombstones[operation.categoryId] || compareRetailVersions(operation.version, metadata.categoryTombstones[operation.categoryId]) > 0)) {
+        const versions = metadata.categoryFields[operation.categoryId] ?? {}
+        for (const [field, value] of Object.entries(operation.changes)) {
+          if (!versions[field] || compareRetailVersions(operation.version, versions[field]) > 0) {
+            ;(category as unknown as Record<string, unknown>)[field] = value
+            versions[field] = operation.version
+          }
+        }
+        metadata.categoryFields[operation.categoryId] = versions
+      }
+    } else if (operation.kind === 'category.delete') {
+      const currentVersion = metadata.categoryTombstones[operation.categoryId]
+      if (!currentVersion || compareRetailVersions(operation.version, currentVersion) > 0) {
+        metadata.categoryTombstones[operation.categoryId] = operation.version
+        this.data.categories = this.data.categories.filter((category) => category.id !== operation.categoryId)
+      }
+    } else {
+      const product = this.data.products.find((item) => item.id === operation.productId)
+      if (product) product.stock = Math.max(0, product.stock + operation.delta)
+    }
+    this.commit()
+  }
+
   private applyRemote(change: RemoteChange): void {
     this.data.products = this.data.products.map((p) =>
       p.id === change.entityId ? { ...p, price: change.value, updatedAt: this.now() } : p,
@@ -443,6 +557,7 @@ export class MockRepository implements Repository {
       field: 'stock',
       crdt: 'PN-Counter',
       discardable: false,
+      retailOperation: { operationId: nextId('retail'), kind: 'inventory.adjust', productId: product.id, delta },
     })
     return adjustment
   }

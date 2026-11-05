@@ -34,9 +34,10 @@ export class DurableOperationLog {
     const existing = this.operationPositions.get(operation.operationId)
     if (existing !== undefined) return { status: "duplicate", position: existing }
     const position = (this.operations.at(-1)?.position ?? 0) + 1
+    const nextOperations = [...this.operations, { position, operation }]
+    this.store.save({ operations: structuredClone(nextOperations) })
     this.operations.push({ position, operation })
     this.operationPositions.set(operation.operationId, position)
-    this.persist()
     return { status: "accepted", position }
   }
 
@@ -58,7 +59,4 @@ export class DurableOperationLog {
     return Buffer.byteLength(JSON.stringify({ operations: this.operations }))
   }
 
-  private persist(): void {
-    this.store.save({ operations: structuredClone(this.operations) })
-  }
 }

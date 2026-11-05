@@ -61,6 +61,14 @@ export type VersionedRetailOperation =
       operationId: string
       replicaId: string
       version: RetailVersion
+      kind: 'category.delete'
+      categoryId: string
+    }
+  | {
+      schemaVersion: 2
+      operationId: string
+      replicaId: string
+      version: RetailVersion
       kind: 'inventory.adjust'
       productId: string
       delta: number
@@ -124,7 +132,7 @@ const isProductFieldValue = (
   value: unknown,
 ): boolean => {
   if (field === 'name') return isNonEmptyString(value, 60)
-  if (field === 'nameAr') return isNonEmptyString(value, 60)
+  if (field === 'nameAr') return typeof value === 'string' && value.length <= 60
   if (field === 'description' || field === 'descriptionAr')
     return typeof value === 'string' && value.length <= 240
   if (field === 'price')
@@ -140,7 +148,8 @@ const isCategoryFieldValue = (
   field: keyof VersionedCategoryField,
   value: unknown,
 ): boolean => {
-  if (field === 'name' || field === 'nameAr') return isNonEmptyString(value, 40)
+  if (field === 'name') return isNonEmptyString(value, 40)
+  if (field === 'nameAr') return typeof value === 'string' && value.length <= 40
   return typeof value === 'string' && value.length <= 240
 }
 
@@ -298,6 +307,13 @@ export const validateVersionedRetailOperation = (
       categoryId,
       changes: validateCategoryPatch(operation.changes),
     }
+
+    if (operation.kind === 'category.delete') {
+      if (!isIdentifier(operation.categoryId)) return invalidOperation('categoryId is invalid')
+      if (!hasOnlyKeys(operation, ['schemaVersion', 'operationId', 'replicaId', 'version', 'kind', 'categoryId']))
+        invalidOperation('category.delete contains unknown fields')
+      return operation as unknown as VersionedRetailOperation
+    }
   }
 
   if (operation.kind === 'inventory.adjust') {
@@ -335,6 +351,12 @@ export type RetailOperation =
     }
   | {
       operationId: string
+      kind: 'product.patch'
+      productId: string
+      changes: Partial<VersionedProductField>
+    }
+  | {
+      operationId: string
       kind: 'product.delete'
       productId: string
     }
@@ -347,6 +369,12 @@ export type RetailOperation =
       operationId: string
       kind: 'category.delete'
       categoryId: string
+    }
+  | {
+      operationId: string
+      kind: 'inventory.adjust'
+      productId: string
+      delta: number
     }
 
 export interface RetailCatalog {

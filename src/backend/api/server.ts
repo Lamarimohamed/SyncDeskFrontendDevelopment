@@ -25,6 +25,10 @@ export interface BackendServerOptions {
   store?: ReplicaStoreLike
   bodyLimitBytes?: number
   corsOrigin?: string
+  versionedOperationStage?: (
+    stage: "beforeAppend" | "afterAppend" | "afterApply" | "beforeCheckpoint" | "afterCheckpoint",
+    operation: VersionedRetailOperation,
+  ) => void
 }
 
 export interface BackendServer {
@@ -51,6 +55,20 @@ interface ErrorResponse {
     message: string
   }
 }
+
+interface VersionedRecoveryState {
+  schemaVersion: 1
+  status: "recovering" | "complete"
+  logPosition: number
+}
+
+const isVersionedRecoveryState = (value: unknown): value is VersionedRecoveryState =>
+  isRecord(value) &&
+  value.schemaVersion === 1 &&
+  (value.status === "recovering" || value.status === "complete") &&
+  typeof value.logPosition === "number" &&
+  Number.isSafeInteger(value.logPosition) &&
+  value.logPosition >= 0
 
 const json = (response: ServerResponse, status: number, body: unknown): void => {
   const encoded = JSON.stringify(body)
@@ -174,8 +192,20 @@ export const createBackendServer = (
     load: (): OperationLogState | undefined => store.load(logRecordId)?.state as OperationLogState | undefined,
     save: (state) => { store.save(logRecordId, state) },
   })
-  const versionedRuntime = new VersionedRetailRuntime()
-  for (const entry of log.all()) versionedRuntime.apply(entry.operation)
+  const versionedRuntime = new VersionedRetailRuntime(retailRuntime.getCatalog())
+  const recoveryRecordId = `${replicaId}:versioned-recovery`
+  const persistRecovery = (state: VersionedRecoveryState): void => {
+    store.save(recoveryRecordId, state)
+  }
+  const logEntries = log.all()
+  const previousRecovery = store.load(recoveryRecordId)?.state
+  if (previousRecovery !== undefined && !isVersionedRecoveryState(previousRecovery))
+    throw new Error(`Invalid versioned recovery state for replica ${replicaId}`)
+  if (logEntries.length > 0 || (previousRecovery as VersionedRecoveryState | undefined)?.status === "recovering") {
+    persistRecovery({ schemaVersion: 1, status: "recovering", logPosition: logEntries.at(-1)?.position ?? 0 })
+    for (const entry of logEntries) versionedRuntime.apply(entry.operation)
+    persistRecovery({ schemaVersion: 1, status: "complete", logPosition: logEntries.at(-1)?.position ?? 0 })
+  }
   let requestChain = Promise.resolve()
   const corsOrigin = options.corsOrigin ?? process.env.BACKEND_CORS_ORIGIN ?? '*'
 
@@ -226,8 +256,21 @@ export const createBackendServer = (
     }
 
     if (method === "GET" && path === "/v1/retail/catalog") {
+      const versionedCatalog = versionedRuntime.catalog()
+      const versionedProductIds = new Set(versionedCatalog.products.map((product) => product.id))
+      const versionedCategoryIds = new Set(versionedCatalog.categories.map((category) => category.id))
+      const legacyCatalog = retailRuntime.getCatalog()
       json(response, 200, {
-        catalog: retailRuntime.getCatalog(),
+        catalog: {
+          products: [
+            ...legacyCatalog.products.filter((product) => !versionedProductIds.has(product.id)),
+            ...versionedCatalog.products,
+          ],
+          categories: [
+            ...legacyCatalog.categories.filter((category) => !versionedCategoryIds.has(category.id)),
+            ...versionedCatalog.categories,
+          ],
+        },
         replicaId,
       })
       return
@@ -267,8 +310,17 @@ export const createBackendServer = (
         }
         const results = body.operations.map((value) => {
           const operation = validateVersionedRetailOperation(value)
+          options.versionedOperationStage?.("beforeAppend", operation)
           const result = log.append(operation)
-          if (result.status === "accepted") versionedRuntime.apply(operation)
+          if (result.status === "accepted") {
+            options.versionedOperationStage?.("afterAppend", operation)
+            persistRecovery({ schemaVersion: 1, status: "recovering", logPosition: result.position })
+            versionedRuntime.apply(operation)
+            options.versionedOperationStage?.("afterApply", operation)
+            options.versionedOperationStage?.("beforeCheckpoint", operation)
+            persistRecovery({ schemaVersion: 1, status: "complete", logPosition: result.position })
+            options.versionedOperationStage?.("afterCheckpoint", operation)
+          }
           return { operationId: operation.operationId, ...result }
         })
         json(response, 200, { results, accepted: results.filter((result) => result.status === "accepted").length, persisted: true })
@@ -289,8 +341,17 @@ export const createBackendServer = (
           if (body.operations.every((operation) => isRecord(operation) && operation.schemaVersion === 2)) {
             const results = body.operations.map((value) => {
               const operation = validateVersionedRetailOperation(value)
+              options.versionedOperationStage?.("beforeAppend", operation)
               const result = log.append(operation)
-              if (result.status === "accepted") versionedRuntime.apply(operation)
+              if (result.status === "accepted") {
+                options.versionedOperationStage?.("afterAppend", operation)
+                persistRecovery({ schemaVersion: 1, status: "recovering", logPosition: result.position })
+                versionedRuntime.apply(operation)
+                options.versionedOperationStage?.("afterApply", operation)
+                options.versionedOperationStage?.("beforeCheckpoint", operation)
+                persistRecovery({ schemaVersion: 1, status: "complete", logPosition: result.position })
+                options.versionedOperationStage?.("afterCheckpoint", operation)
+              }
               return { operationId: operation.operationId, ...result }
             })
             json(response, 200, {

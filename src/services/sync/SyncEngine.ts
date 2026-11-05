@@ -11,12 +11,12 @@ import { nextId } from '@/lib/ids'
 import { logger } from '@/lib/logger'
 import { readJson, writeJson, type KeyValueStorage } from '@/lib/storage'
 import type { BackendApiClient } from '@/services/backendApi'
+import type { RetailOperation, VersionedRetailOperation } from '@/domain/retailSync'
 
 /**
- * Frontend simulation of the synchronization layer. It models connectivity,
- * a pending-operation queue and a merge step, but contains no real CRDT:
- * conflict handling mirrors last-writer-wins semantics for price only.
- * A real synchronizer can replace this class behind the same surface.
+ * Browser synchronization coordinator. Local UI writes remain optimistic,
+ * while versioned retail operations are persisted and exchanged through the
+ * server-mediated protocol when configured.
  */
 
 export interface SyncEngineOptions {
@@ -31,6 +31,7 @@ export interface SyncEngineOptions {
   seedActivity?: ActivityEvent[]
   seedLastSyncAt?: number | null
   backendClient?: BackendApiClient
+  onVersionedOperation?: (operation: VersionedRetailOperation, source: 'local' | 'remote') => void
 }
 
 type MergeHandler = (change: RemoteChange) => void
@@ -44,6 +45,9 @@ interface Persisted {
   remote: RemoteChange[]
   lastSyncAt: number | null
   counters: SyncSnapshot['counters']
+  cursor: number
+  logicalTime: number
+  appliedOperationIds: string[]
 }
 
 const STORAGE_KEY = 'syncdesk.sync.v1'
@@ -55,9 +59,10 @@ const MERGE_RULE = 'Last-writer-wins register: the value with the later timestam
 export class SyncEngine {
   readonly replicaId: string
   readonly deviceId: string
-  private readonly opts: Required<Omit<SyncEngineOptions, 'storage' | 'seedActivity' | 'seedLastSyncAt' | 'backendClient'>> & {
+  private readonly opts: Required<Omit<SyncEngineOptions, 'storage' | 'seedActivity' | 'seedLastSyncAt' | 'backendClient' | 'onVersionedOperation'>> & {
     storage: KeyValueStorage
     backendClient?: BackendApiClient
+    onVersionedOperation?: SyncEngineOptions['onVersionedOperation']
   }
   private snapshot: SyncSnapshot
   private remote: RemoteChange[]
@@ -66,6 +71,9 @@ export class SyncEngine {
   private timers = new Set<ReturnType<typeof setTimeout>>()
   private failNextSync = false
   private inFlight = new Set<string>()
+  private cursor: number
+  private logicalTime: number
+  private appliedOperationIds: Set<string>
 
   constructor(options: SyncEngineOptions) {
     this.replicaId = options.replicaId ?? 'replica-a7f2'
@@ -80,8 +88,12 @@ export class SyncEngine {
       now: options.now ?? Date.now,
       isAutoSyncEnabled: options.isAutoSyncEnabled ?? (() => true),
       backendClient: options.backendClient,
+      onVersionedOperation: options.onVersionedOperation,
     }
     const saved = readJson<Persisted | null>(options.storage, STORAGE_KEY, null)
+    this.cursor = saved?.cursor ?? 0
+    this.logicalTime = saved?.logicalTime ?? 0
+    this.appliedOperationIds = new Set(saved?.appliedOperationIds ?? [])
     this.remote = saved?.remote ?? []
     this.snapshot = {
       replicaId: this.replicaId,
@@ -95,6 +107,13 @@ export class SyncEngine {
       remoteWaiting: this.remote.length,
       counters: saved?.counters ?? { bytesSent: 0, bytesReceived: 0, mergeCount: 0, conflictCount: 0, lastMergeAt: null },
     }
+    this.snapshot.pending = this.snapshot.pending.map((change) => {
+      if (change.versionedOperation || !change.retailOperation) return change
+      const versionedOperation = this.toVersionedOperation(change.retailOperation)
+      if (!versionedOperation) return change
+      this.appliedOperationIds.add(versionedOperation.operationId)
+      return { ...change, versionedOperation }
+    })
   }
 
   getSnapshot = (): SyncSnapshot => this.snapshot
@@ -108,9 +127,14 @@ export class SyncEngine {
     this.mergeHandler = handler
   }
 
+  setVersionedOperationHandler(handler: (operation: VersionedRetailOperation, source: 'local' | 'remote') => void): void {
+    this.opts.onVersionedOperation = handler
+  }
+
   /** Resume work that was interrupted by a page refresh. */
   start(): void {
-    if (this.snapshot.connectivity === 'online' && this.snapshot.pending.length > 0 && this.opts.isAutoSyncEnabled()) {
+    if (this.snapshot.connectivity === 'online' && this.opts.isAutoSyncEnabled() &&
+        (this.snapshot.pending.length > 0 || Boolean(this.opts.backendClient))) {
       this.scheduleAutoSync()
     }
   }
@@ -122,8 +146,12 @@ export class SyncEngine {
 
   enqueue(draft: ChangeDraft): PendingChange {
     const createdAt = this.opts.now()
+    const versionedOperation = draft.retailOperation
+      ? this.toVersionedOperation(draft.retailOperation)
+      : undefined
     const change: PendingChange = {
       ...draft,
+      versionedOperation,
       id: nextId('op'),
       status: 'pending',
       attempts: 0,
@@ -131,6 +159,10 @@ export class SyncEngine {
       sizeBytes: OP_OVERHEAD_BYTES + draft.summary.length + (draft.to?.length ?? 0),
     }
     this.update({ pending: [...this.snapshot.pending, change] })
+    if (versionedOperation) {
+      this.appliedOperationIds.add(versionedOperation.operationId)
+      this.opts.onVersionedOperation?.(versionedOperation, 'local')
+    }
     this.log('change-created', `Local change created: ${draft.summary}`, draft.entityLabel)
     if (this.snapshot.connectivity !== 'online') {
       this.log('change-queued', 'Change queued', 'Waiting for connectivity')
@@ -249,7 +281,26 @@ export class SyncEngine {
     const local = this.snapshot.pending.filter((p) => this.inFlight.has(p.id))
     if (this.opts.backendClient && local.length > 0) {
       try {
-        await this.opts.backendClient.syncChanges(this.replicaId, local)
+        const versioned = local.flatMap((change) => change.versionedOperation ? [change.versionedOperation] : [])
+        if (versioned.length > 0) await this.opts.backendClient.pushVersionedOperations(versioned)
+        const legacy = local.filter((change) => !change.versionedOperation)
+        if (legacy.length > 0) await this.opts.backendClient.syncChanges(this.replicaId, legacy)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'The backend synchronization failed.'
+        this.log('sync-failed', 'Backend synchronization failed', message)
+        this.update({
+          phase: 'error',
+          lastError: message,
+          pending: this.snapshot.pending.map((p) =>
+            this.inFlight.has(p.id) ? { ...p, status: 'failed', attempts: p.attempts + 1 } : p,
+          ),
+        })
+        return
+      }
+    }
+    if (this.opts.backendClient) {
+      try {
+        await this.pullVersionedOperations()
       } catch (error) {
         const message = error instanceof Error ? error.message : 'The backend synchronization failed.'
         this.log('sync-failed', 'Backend synchronization failed', message)
@@ -372,7 +423,60 @@ export class SyncEngine {
       remote: this.remote,
       lastSyncAt: s.lastSyncAt,
       counters: s.counters,
+      cursor: this.cursor,
+      logicalTime: this.logicalTime,
+      appliedOperationIds: [...this.appliedOperationIds],
     }
     writeJson(this.opts.storage, STORAGE_KEY, data)
+  }
+
+  private async pullVersionedOperations(): Promise<void> {
+    if (!this.opts.backendClient) return
+    let page = await this.opts.backendClient.pullVersionedOperations(this.cursor)
+    while (true) {
+      for (const entry of page.operations) {
+        this.logicalTime = Math.max(this.logicalTime, entry.operation.version.logicalTime)
+        if (!this.appliedOperationIds.has(entry.operation.operationId)) {
+          this.opts.onVersionedOperation?.(entry.operation, 'remote')
+          this.appliedOperationIds.add(entry.operation.operationId)
+        }
+      }
+      this.cursor = page.nextCursor
+      this.commit()
+      if (!page.hasMore) return
+      page = await this.opts.backendClient.pullVersionedOperations(this.cursor)
+    }
+  }
+
+  private toVersionedOperation(operation: RetailOperation): VersionedRetailOperation | undefined {
+    const operationId = operation.operationId
+    const version = { logicalTime: ++this.logicalTime, replicaId: this.replicaId, operationId }
+    if (operation.kind === 'product.upsert') {
+      return { schemaVersion: 2, operationId, replicaId: this.replicaId, version, kind: 'product.restore', productId: operation.product.id, product: operation.product }
+    }
+    if (operation.kind === 'product.patch') {
+      return { schemaVersion: 2, operationId, replicaId: this.replicaId, version, kind: 'product.patch', productId: operation.productId, changes: operation.changes }
+    }
+    if (operation.kind === 'product.delete') {
+      return { schemaVersion: 2, operationId, replicaId: this.replicaId, version, kind: 'product.delete', productId: operation.productId }
+    }
+    if (operation.kind === 'category.upsert') {
+      return {
+        schemaVersion: 2,
+        operationId,
+        replicaId: this.replicaId,
+        version,
+        kind: 'category.patch',
+        categoryId: operation.category.id,
+        changes: { name: operation.category.name, nameAr: operation.category.nameAr, description: operation.category.description },
+      }
+    }
+    if (operation.kind === 'inventory.adjust') {
+      return { schemaVersion: 2, operationId, replicaId: this.replicaId, version, kind: 'inventory.adjust', productId: operation.productId, delta: operation.delta }
+    }
+    if (operation.kind === 'category.delete') {
+      return { schemaVersion: 2, operationId, replicaId: this.replicaId, version, kind: 'category.delete', categoryId: operation.categoryId }
+    }
+    return undefined
   }
 }

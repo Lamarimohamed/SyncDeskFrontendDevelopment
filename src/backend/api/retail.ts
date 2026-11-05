@@ -78,12 +78,28 @@ export class RetailDomainRuntime {
         ...this.catalog,
         products: [operation.product, ...this.catalog.products.filter((product) => product.id !== operation.product.id)],
       }
+    } else if (operation.kind === 'product.patch') {
+      this.catalog = {
+        ...this.catalog,
+        products: this.catalog.products.map((product) =>
+          product.id === operation.productId ? { ...product, ...operation.changes } : product,
+        ),
+      }
     } else if (operation.kind === 'product.delete') {
       this.catalog = { ...this.catalog, products: this.catalog.products.filter((product) => product.id !== operation.productId) }
     } else if (operation.kind === 'category.upsert') {
       this.catalog = {
         ...this.catalog,
         categories: [operation.category, ...this.catalog.categories.filter((category) => category.id !== operation.category.id)],
+      }
+    } else if (operation.kind === 'inventory.adjust') {
+      this.catalog = {
+        ...this.catalog,
+        products: this.catalog.products.map((product) =>
+          product.id === operation.productId
+            ? { ...product, stock: Math.max(0, product.stock + operation.delta) }
+            : product,
+        ),
       }
     } else {
       this.catalog = { ...this.catalog, categories: this.catalog.categories.filter((category) => category.id !== operation.categoryId) }

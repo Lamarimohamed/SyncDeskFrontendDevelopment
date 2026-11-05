@@ -24,4 +24,20 @@ describe("durable operation log", () => {
     const restored = DurableOperationLog.load(store)
     expect(restored.after(1, 10).operations.map((entry) => entry.operation.operationId)).toEqual(["o2"])
   })
+
+  it("does not reserve an operation when durable persistence fails", () => {
+    let attempts = 0
+    const store = {
+      load: () => undefined,
+      save: (_state: OperationLogState) => {
+        attempts += 1
+        throw new Error("disk unavailable")
+      },
+    }
+    const log = DurableOperationLog.load(store)
+
+    expect(() => log.append(operation("o1"))).toThrow("disk unavailable")
+    expect(log.all()).toEqual([])
+    expect(attempts).toBe(1)
+  })
 })

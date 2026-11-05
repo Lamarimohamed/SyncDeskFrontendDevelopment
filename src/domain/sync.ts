@@ -40,6 +40,7 @@ export interface PendingChange {
   /** Whether it is semantically safe to discard the change from the queue. */
   discardable: boolean
   retailOperation?: RetailOperation
+  versionedOperation?: VersionedRetailOperation
 }
 
 export type ChangeDraft = Omit<PendingChange, 'id' | 'status' | 'attempts' | 'createdAt' | 'sizeBytes'>
@@ -116,4 +117,4 @@ export interface SyncSnapshot {
 }
 
 export type MetricProvenance = 'real' | 'simulated' | 'unavailable'
-import type { RetailOperation } from './retailSync'
+import type { RetailOperation, VersionedRetailOperation } from './retailSync'

@@ -136,6 +136,96 @@ describe("backend HTTP API", () => {
       await restarted.close()
     }
   })
+
+  it.each(["afterAppend", "afterApply", "beforeCheckpoint", "afterCheckpoint"] as const)(
+    "recovers a durably accepted operation after a crash at %s",
+    async (crashStage) => {
+      const store = new ReplicaStore()
+      const operation = {
+        schemaVersion: 2,
+        operationId: `crash-${crashStage}`,
+        replicaId: "client-a",
+        version: { logicalTime: 1, replicaId: "client-a", operationId: `crash-${crashStage}` },
+        kind: "product.restore",
+        productId: "p-crash",
+        product: {
+          id: "p-crash",
+          name: "Recovered",
+          nameAr: "مستعاد",
+          description: "Crash recovery",
+          descriptionAr: "",
+          price: 50,
+          categoryId: "c",
+          availability: "available",
+          stock: 3,
+          lowStockThreshold: 1,
+          updatedAt: 1,
+        },
+      } as const
+      const first = await startBackendServer({
+        port: 0,
+        store,
+        replicaId: "crash-server",
+        versionedOperationStage: (stage, candidate) => {
+          if (stage === crashStage && candidate.operationId === operation.operationId)
+            throw new Error(`Injected crash at ${stage}`)
+        },
+      })
+
+      try {
+        const response = await httpRequest(first.port, "POST", "/v1/sync/operations", { operations: [operation] })
+        expect(response.status).toBe(400)
+      } finally {
+        await first.close()
+      }
+
+      const recovered = await startBackendServer({ port: 0, store, replicaId: "crash-server" })
+      try {
+        const state = await httpRequest(recovered.port, "GET", "/v1/sync/catalog")
+        expect(state.body).toMatchObject({
+          catalog: { products: [{ id: "p-crash", name: "Recovered", price: 50 }] },
+          appliedOperationIds: [operation.operationId],
+        })
+      } finally {
+        await recovered.close()
+      }
+    },
+  )
+
+  it("does not persist an operation when it crashes before log append", async () => {
+    const store = new ReplicaStore()
+    const operation = {
+      schemaVersion: 2,
+      operationId: "before-append",
+      replicaId: "client-a",
+      version: { logicalTime: 1, replicaId: "client-a", operationId: "before-append" },
+      kind: "inventory.adjust",
+      productId: "p",
+      delta: 1,
+    } as const
+    const first = await startBackendServer({
+      port: 0,
+      store,
+      replicaId: "before-append-server",
+      versionedOperationStage: (stage) => {
+        if (stage === "beforeAppend") throw new Error("Injected crash")
+      },
+    })
+    try {
+      const response = await httpRequest(first.port, "POST", "/v1/sync/operations", { operations: [operation] })
+      expect(response.status).toBe(400)
+    } finally {
+      await first.close()
+    }
+
+    const recovered = await startBackendServer({ port: 0, store, replicaId: "before-append-server" })
+    try {
+      const page = await httpRequest(recovered.port, "GET", "/v1/sync/operations?after=0&limit=10")
+      expect(page.body).toMatchObject({ operations: [], nextCursor: 0 })
+    } finally {
+      await recovered.close()
+    }
+  })
   it("reports health and an empty replica state", async () => {
     const backend = await startBackendServer({ port: 0 })
     try {

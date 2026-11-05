@@ -119,7 +119,13 @@ export class BackendApiClient {
     replicaId: string,
     changes: readonly PendingChange[],
   ): Promise<BackendSyncResponse> {
-    const retailOperations = changes.flatMap((change) => change.retailOperation ? [change.retailOperation] : [])
+    const retailOperations = changes.flatMap((change) =>
+      change.retailOperation &&
+      change.retailOperation.kind !== 'inventory.adjust' &&
+      change.retailOperation.kind !== 'product.patch'
+        ? [change.retailOperation]
+        : [],
+    )
     if (retailOperations.length > 0) await this.syncRetailOperations(retailOperations)
     const replica = new ReplicaRuntime<string>(replicaId)
     for (const change of changes) {
