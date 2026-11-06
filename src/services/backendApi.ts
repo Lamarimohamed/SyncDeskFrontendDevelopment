@@ -122,7 +122,10 @@ export class BackendApiClient {
     const retailOperations = changes.flatMap((change) =>
       change.retailOperation &&
       change.retailOperation.kind !== 'inventory.adjust' &&
-      change.retailOperation.kind !== 'product.patch'
+      change.retailOperation.kind !== 'product.patch' &&
+      change.retailOperation.kind !== 'inventory.restock' &&
+      change.retailOperation.kind !== 'inventory.decrement' &&
+      change.retailOperation.kind !== 'inventory.transfer'
         ? [change.retailOperation]
         : [],
     )

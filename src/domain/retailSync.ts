@@ -1,4 +1,5 @@
 import type { Category, Product } from './types'
+import type { StockOperation } from './stock'
 
 export interface RetailVersion {
   logicalTime: number
@@ -73,6 +74,7 @@ export type VersionedRetailOperation =
       productId: string
       delta: number
     }
+  | StockOperation
 
 const MAX_IDENTIFIER_LENGTH = 256
 const MAX_LOGICAL_TIME = Number.MAX_SAFE_INTEGER
@@ -340,6 +342,37 @@ export const validateVersionedRetailOperation = (
     return operation as unknown as VersionedRetailOperation
   }
 
+  if (
+    operation.kind === 'inventory.restock' ||
+    operation.kind === 'inventory.decrement'
+  ) {
+    if (!hasOnlyKeys(operation, ['schemaVersion', 'operationId', 'replicaId', 'version', 'kind', 'productId', 'tokenIds']))
+      return invalidOperation(`${operation.kind} contains unknown fields`)
+    if (!isIdentifier(operation.productId) || !Array.isArray(operation.tokenIds) || operation.tokenIds.length === 0 || !operation.tokenIds.every(isIdentifier))
+      return invalidOperation(`${operation.kind} tokenIds are invalid`)
+    return operation as unknown as VersionedRetailOperation
+  }
+
+  if (operation.kind === 'inventory.transfer') {
+    if (!hasOnlyKeys(operation, [
+      'schemaVersion', 'operationId', 'replicaId', 'version', 'kind',
+      'productId', 'transferId', 'fromReplicaId', 'toReplicaId', 'tokenIds',
+    ]))
+      return invalidOperation('inventory.transfer contains unknown fields')
+    if (
+      !isIdentifier(operation.transferId) ||
+      !isIdentifier(operation.productId) ||
+      !isIdentifier(operation.fromReplicaId) ||
+      !isIdentifier(operation.toReplicaId) ||
+      operation.fromReplicaId === operation.toReplicaId ||
+      !Array.isArray(operation.tokenIds) ||
+      operation.tokenIds.length === 0 ||
+      !operation.tokenIds.every(isIdentifier)
+    )
+      return invalidOperation('inventory.transfer payload is invalid')
+    return operation as unknown as VersionedRetailOperation
+  }
+
   return invalidOperation('kind is invalid')
 }
 
@@ -375,6 +408,21 @@ export type RetailOperation =
       kind: 'inventory.adjust'
       productId: string
       delta: number
+    }
+  | {
+      operationId: string
+      kind: 'inventory.restock' | 'inventory.decrement'
+      productId: string
+      tokenIds: string[]
+    }
+  | {
+      operationId: string
+      kind: 'inventory.transfer'
+      productId: string
+      transferId: string
+      fromReplicaId: string
+      toReplicaId: string
+      tokenIds: string[]
     }
 
 export interface RetailCatalog {

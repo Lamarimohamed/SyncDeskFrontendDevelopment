@@ -192,7 +192,7 @@ export const createBackendServer = (
     load: (): OperationLogState | undefined => store.load(logRecordId)?.state as OperationLogState | undefined,
     save: (state) => { store.save(logRecordId, state) },
   })
-  const versionedRuntime = new VersionedRetailRuntime(retailRuntime.getCatalog())
+  const versionedRuntime = new VersionedRetailRuntime(retailRuntime.getCatalog(), replicaId)
   const recoveryRecordId = `${replicaId}:versioned-recovery`
   const persistRecovery = (state: VersionedRecoveryState): void => {
     store.save(recoveryRecordId, state)

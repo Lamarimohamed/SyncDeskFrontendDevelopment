@@ -474,6 +474,31 @@ export class SyncEngine {
     if (operation.kind === 'inventory.adjust') {
       return { schemaVersion: 2, operationId, replicaId: this.replicaId, version, kind: 'inventory.adjust', productId: operation.productId, delta: operation.delta }
     }
+    if (operation.kind === 'inventory.restock' || operation.kind === 'inventory.decrement') {
+      return {
+        schemaVersion: 2,
+        operationId,
+        replicaId: this.replicaId,
+        version,
+        kind: operation.kind,
+        productId: operation.productId,
+        tokenIds: operation.tokenIds,
+      }
+    }
+    if (operation.kind === 'inventory.transfer') {
+      return {
+        schemaVersion: 2,
+        operationId,
+        replicaId: this.replicaId,
+        version,
+        kind: operation.kind,
+        productId: operation.productId,
+        transferId: operation.transferId,
+        fromReplicaId: operation.fromReplicaId,
+        toReplicaId: operation.toReplicaId,
+        tokenIds: operation.tokenIds,
+      }
+    }
     if (operation.kind === 'category.delete') {
       return { schemaVersion: 2, operationId, replicaId: this.replicaId, version, kind: 'category.delete', categoryId: operation.categoryId }
     }
