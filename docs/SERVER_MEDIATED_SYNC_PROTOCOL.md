@@ -196,3 +196,31 @@ compatibility, but it is no longer the browser transport format. Pulled
 operations use the repository's version-aware handler and are never
 re-enqueued. Legacy backend methods remain available for callers outside the
 browser `SyncEngine`.
+
+## Escrowed stock protocol
+
+Inventory stock uses one token ledger per product. Each unconsumed token is
+one decrement right and the displayed stock is the count of unconsumed tokens.
+Restock creates unique token IDs owned by the originating replica; decrement
+consumes token IDs only when that replica owns them; transfer moves ownership
+without changing stock. The PN-counter increment and decrement component
+counts are derived from accepted token effects and are not a second stock
+authority.
+
+Operations carry stable operation IDs, replica IDs, versions, product IDs, and
+token IDs. Duplicate operation identities are idempotent, conflicting payloads
+for one identity are rejected, and transfer IDs are also deduplicated. Replay
+sorts operations by the existing deterministic retail version order, so
+delayed or out-of-order delivery converges once every accepted operation is
+available. A local replica may see stale global stock while disconnected; it
+cannot spend rights it does not own, and an exhausted decrement is rejected
+instead of being queued as a successful operation.
+
+The initial allocation is explicit in the persisted token state. Replica
+registration does not create rights or stock. Retirement and administrative
+correction require an allocation authority and are not exposed as arbitrary
+offline negative adjustments in this milestone. Token state is persisted with
+the browser data set and is reconstructed from versioned operations on the
+server. This provides replay and restart recovery within the existing
+application-level persistence guarantees; it does not claim power-loss
+durability without filesystem `fsync` verification.

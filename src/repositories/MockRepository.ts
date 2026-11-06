@@ -1,7 +1,8 @@
 import { buildSeed, PEER_SEEDS, THIS_DEVICE_ID, type Seed } from '@/data/seed'
 import { stockLevel, adjustmentDelta, validateAdjustment, validateCategoryName, validateProduct } from '@/domain/rules'
 import type { ChangeDraft, RemoteChange, SyncSnapshot } from '@/domain/sync'
-import { compareRetailVersions, type RetailCatalog, type RetailVersion, type VersionedRetailOperation } from '@/domain/retailSync'
+import { compareRetailVersions, type RetailCatalog, type RetailOperation, type RetailVersion, type VersionedRetailOperation } from '@/domain/retailSync'
+import { EscrowedStock, type EscrowedStockState, type StockOperation } from '@/domain/stock'
 import {
   RepositoryError,
   ValidationError,
@@ -30,6 +31,7 @@ interface DataSet {
   adjustments: StockAdjustment[]
   /** Identifiers of removed products; kept so removals can propagate. */
   tombstones: string[]
+  stocks: Record<string, EscrowedStockState>
   versioned?: {
     applied: string[]
     productFields: Record<string, Record<string, RetailVersion>>
@@ -74,6 +76,12 @@ export class MockRepository implements Repository {
       products: seed.products,
       adjustments: seed.adjustments,
       tombstones: [],
+      stocks: {},
+    }
+    this.data.stocks ??= {}
+    for (const product of this.data.products) {
+      if (!this.data.stocks[product.id])
+        this.data.stocks[product.id] = EscrowedStock.create(engine.replicaId, product.stock, `${product.id}:${engine.replicaId}`).stateSnapshot()
     }
     this.data.versioned ??= { applied: [], productFields: {}, productTombstones: {}, productRestores: {}, categoryFields: {}, categoryTombstones: {} }
     engine.subscribe(() => this.emit())
@@ -97,7 +105,9 @@ export class MockRepository implements Repository {
   }
   resetDemoData(): void {
     const seed = buildSeed(this.now())
-    this.data = { categories: seed.categories, products: seed.products, adjustments: seed.adjustments, tombstones: [] }
+    this.data = { categories: seed.categories, products: seed.products, adjustments: seed.adjustments, tombstones: [], stocks: {} }
+    for (const product of seed.products)
+      this.data.stocks[product.id] = EscrowedStock.create(this.engine.replicaId, product.stock, `${product.id}:${this.engine.replicaId}`).stateSnapshot()
     this.commit()
   }
 
@@ -453,6 +463,25 @@ export class MockRepository implements Repository {
       this.commit()
       return
     }
+    if (
+      operation.kind === 'inventory.restock' ||
+      operation.kind === 'inventory.decrement' ||
+      operation.kind === 'inventory.transfer'
+    ) {
+      const product = this.data.products.find((item) => item.id === operation.productId)
+      if (product) {
+        const ledger = new EscrowedStock(
+          this.engine.replicaId,
+          this.data.stocks[operation.productId] ??
+            EscrowedStock.create(this.engine.replicaId, product.stock, `${product.id}:${this.engine.replicaId}`).stateSnapshot(),
+        )
+        ledger.apply(operation as StockOperation)
+        this.data.stocks[operation.productId] = ledger.stateSnapshot()
+        product.stock = ledger.value()
+      }
+      this.commit()
+      return
+    }
     if (operation.kind === 'product.restore') {
       const currentRestore = metadata.productRestores[operation.productId]
       const currentVersion = metadata.productTombstones[operation.productId]
@@ -536,6 +565,28 @@ export class MockRepository implements Repository {
     notes: string,
     resultingStock: number,
   ): StockAdjustment {
+    const state = this.data.stocks[product.id] ??
+      EscrowedStock.create(this.engine.replicaId, product.stock, `${product.id}:${this.engine.replicaId}`).stateSnapshot()
+    const ledger = new EscrowedStock(this.engine.replicaId, state)
+    if (delta < 0 && ledger.availableRights(this.engine.replicaId) < Math.abs(delta))
+      throw new RepositoryError('This device has no escrow rights available for this decrement.')
+    const operationId = nextId('retail')
+    const tokenIds = delta >= 0
+      ? Array.from({ length: delta }, (_, index) => `${operationId}:${index}`)
+      : Object.entries(ledger.snapshot().tokens)
+          .filter(([, token]) => token.owner === this.engine.replicaId && !token.consumedBy)
+          .slice(0, Math.abs(delta))
+          .map(([tokenId]) => tokenId)
+    const stockOperation: RetailOperation = delta >= 0
+      ? { operationId, kind: 'inventory.restock', productId: product.id, tokenIds }
+      : { operationId, kind: 'inventory.decrement', productId: product.id, tokenIds }
+    ledger.apply({
+      ...stockOperation,
+      replicaId: this.engine.replicaId,
+      version: { logicalTime: Date.now(), replicaId: this.engine.replicaId, operationId },
+    } as StockOperation)
+    this.data.stocks[product.id] = ledger.stateSnapshot()
+    resultingStock = ledger.value()
     const adjustment: StockAdjustment = {
       id: nextId('adj'),
       productId: product.id,
@@ -557,7 +608,7 @@ export class MockRepository implements Repository {
       field: 'stock',
       crdt: 'PN-Counter',
       discardable: false,
-      retailOperation: { operationId: nextId('retail'), kind: 'inventory.adjust', productId: product.id, delta },
+      retailOperation: stockOperation,
     })
     return adjustment
   }

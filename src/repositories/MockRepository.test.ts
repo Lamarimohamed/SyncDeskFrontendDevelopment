@@ -58,12 +58,12 @@ describe('MockRepository products', () => {
     await expect(h.repo.deleteCategory('c-drinks')).rejects.toBeInstanceOf(ValidationError)
   })
 
-  it('allows stock to go negative and reports the level honestly', async () => {
+  it('rejects stock removal when local escrow rights are exhausted', async () => {
     h = createHarness()
-    await h.repo.adjustStock({ productId: 'p-water', type: 'remove', quantity: 5, reason: 'sale', notes: '' })
+    await expect(h.repo.adjustStock({ productId: 'p-water', type: 'remove', quantity: 15, reason: 'sale', notes: '' }))
+      .rejects.toThrow('no escrow rights')
     const water = await h.repo.getProduct('p-water')
-    expect(water.stock).toBe(-5)
-    expect(water.stockLevel).toBe('negative')
+    expect(water.stock).toBe(0)
   })
 
   it('hydrates the authoritative backend catalog without overwriting pending local edits', async () => {

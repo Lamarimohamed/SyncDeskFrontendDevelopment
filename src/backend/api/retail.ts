@@ -101,7 +101,7 @@ export class RetailDomainRuntime {
             : product,
         ),
       }
-    } else {
+    } else if (operation.kind === 'category.delete') {
       this.catalog = { ...this.catalog, categories: this.catalog.categories.filter((category) => category.id !== operation.categoryId) }
     }
     this.replica.add(`retail:${operation.operationId}`)

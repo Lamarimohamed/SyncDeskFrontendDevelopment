@@ -1,4 +1,5 @@
 import type { Category, Product } from "../../domain/types"
+import { EscrowedStock, type EscrowedStockState, type StockOperation } from "../../domain/stock"
 import {
   compareRetailVersions,
   type VersionedProductField,
@@ -13,16 +14,32 @@ export interface VersionedRetailRuntimeSnapshot {
   categories: Array<[string, CategoryRecord]>
   inventory: Array<[string, number]>
   appliedOperationIds: string[]
+  stocks: Array<[string, EscrowedStockState]>
 }
 
 export class VersionedRetailRuntime {
+  private readonly replicaId: string
   private readonly applied = new Set<string>()
   private readonly products = new Map<string, ProductRecord>()
   private readonly categories = new Map<string, CategoryRecord>()
   private readonly inventory = new Map<string, number>()
+  private readonly stocks = new Map<string, EscrowedStock>()
 
-  constructor(initial: { products: Product[]; categories: Category[] } = { products: [], categories: [] }) {
-    for (const product of initial.products) this.products.set(product.id, { fields: structuredClone(product), fieldVersions: {} })
+  constructor(
+    initial: { products: Product[]; categories: Category[] } = { products: [], categories: [] },
+    replicaId = "server",
+    stockStates: Record<string, EscrowedStockState> = {},
+  ) {
+    this.replicaId = replicaId
+    for (const product of initial.products) {
+      this.products.set(product.id, { fields: structuredClone(product), fieldVersions: {} })
+      this.stocks.set(
+        product.id,
+        stockStates[product.id]
+          ? new EscrowedStock(replicaId, stockStates[product.id])
+          : EscrowedStock.create(replicaId, product.stock, `${product.id}:${replicaId}`),
+      )
+    }
     for (const category of initial.categories) this.categories.set(category.id, { fields: structuredClone(category), fieldVersions: {} })
   }
 
@@ -55,6 +72,8 @@ export class VersionedRetailRuntime {
           ),
           restoredVersion: version,
         })
+        if (!this.stocks.has(operation.product.id))
+          this.stocks.set(operation.product.id, EscrowedStock.create(this.replicaId, operation.product.stock, `${operation.product.id}:restore`))
       }
     } else if (operation.kind === "category.patch") {
       const record = this.categories.get(operation.categoryId)
@@ -79,11 +98,44 @@ export class VersionedRetailRuntime {
     } else if (operation.kind === "category.delete") {
       const record = this.categories.get(operation.categoryId)
       if (record && (!record.tombstone || compareRetailVersions(version, record.tombstone) > 0)) record.tombstone = version
+    } else if (operation.kind === "inventory.adjust") {
+      const stock = this.stocks.get(operation.productId)
+      if (stock) {
+        const tokenIds = operation.delta > 0
+          ? Array.from({ length: operation.delta }, (_, index) => `${operation.operationId}:${index}`)
+          : stock.snapshot().tokens
+              ? Object.entries(stock.snapshot().tokens)
+                  .filter(([, token]) => token.owner === operation.replicaId && !token.consumedBy)
+                  .slice(0, Math.abs(operation.delta))
+                  .map(([tokenId]) => tokenId)
+              : []
+        if (operation.delta > 0) {
+          stock.apply({
+            operationId: operation.operationId,
+            productId: operation.productId,
+            replicaId: operation.replicaId,
+            version,
+            kind: "inventory.restock",
+            tokenIds,
+          })
+        } else if (tokenIds.length === Math.abs(operation.delta)) {
+          stock.apply({
+            operationId: operation.operationId,
+            productId: operation.productId,
+            replicaId: operation.replicaId,
+            version,
+            kind: "inventory.decrement",
+            tokenIds,
+          })
+        }
+        this.setStockValue(operation.productId, stock.value())
+      }
     } else {
-      const nextStock = (this.inventory.get(operation.productId) ?? this.products.get(operation.productId)?.fields.stock ?? 0) + operation.delta
-      this.inventory.set(operation.productId, nextStock)
-      const product = this.products.get(operation.productId)
-      if (product && !product.tombstone) product.fields = { ...product.fields, stock: Math.max(0, nextStock) }
+      const stock = this.stocks.get(operation.productId)
+      if (stock) {
+        stock.apply(operation as StockOperation)
+        this.setStockValue(operation.productId, stock.value())
+      }
     }
     return "applied"
   }
@@ -97,12 +149,18 @@ export class VersionedRetailRuntime {
 
   operationIds(): string[] { return [...this.applied].sort() }
 
+  private setStockValue(productId: string, value: number): void {
+    const product = this.products.get(productId)
+    if (product && !product.tombstone) product.fields = { ...product.fields, stock: value }
+  }
+
   snapshot(): VersionedRetailRuntimeSnapshot {
     return structuredClone({
       products: [...this.products.entries()].sort(([left], [right]) => left.localeCompare(right)),
       categories: [...this.categories.entries()].sort(([left], [right]) => left.localeCompare(right)),
       inventory: [...this.inventory.entries()].sort(([left], [right]) => left.localeCompare(right)),
       appliedOperationIds: this.operationIds(),
+      stocks: [...this.stocks.entries()].map(([productId, stock]) => [productId, stock.stateSnapshot()]),
     })
   }
 }
