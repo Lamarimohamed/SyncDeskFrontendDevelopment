@@ -4,6 +4,13 @@ export interface KeyValueStorage {
   removeItem(key: string): void
 }
 
+export class StorageUnavailableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'StorageUnavailableError'
+  }
+}
+
 export function createMemoryStorage(): KeyValueStorage {
   const map = new Map<string, string>()
   return {
@@ -19,7 +26,9 @@ export function browserStorage(kind: 'local' | 'session' = 'local'): KeyValueSto
     s.getItem('__probe__')
     return s
   } catch {
-    return createMemoryStorage()
+    throw new StorageUnavailableError(
+      `${kind} browser storage is unavailable. Enable site storage and reload before continuing.`,
+    )
   }
 }
 

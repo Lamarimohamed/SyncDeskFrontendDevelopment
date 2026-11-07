@@ -10,6 +10,7 @@ import type {
 import { nextId } from '@/lib/ids'
 import { logger } from '@/lib/logger'
 import { readJson, writeJson, type KeyValueStorage } from '@/lib/storage'
+import { loadOrCreateInstallationIdentity } from '@/lib/installationIdentity'
 import type { BackendApiClient } from '@/services/backendApi'
 import type { RetailOperation, VersionedRetailOperation } from '@/domain/retailSync'
 
@@ -76,8 +77,11 @@ export class SyncEngine {
   private appliedOperationIds: Set<string>
 
   constructor(options: SyncEngineOptions) {
-    this.replicaId = options.replicaId ?? 'replica-a7f2'
-    this.deviceId = options.deviceId ?? 'dev-counter'
+    const identity = options.replicaId && options.deviceId
+      ? { replicaId: options.replicaId, deviceId: options.deviceId }
+      : loadOrCreateInstallationIdentity(options.storage)
+    this.replicaId = options.replicaId ?? identity.replicaId
+    this.deviceId = options.deviceId ?? identity.deviceId
     this.opts = {
       storage: options.storage,
       replicaId: this.replicaId,
