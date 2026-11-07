@@ -36,6 +36,39 @@ const catalogProduct = (runtime: VersionedRetailRuntime): Product =>
   runtime.catalog().products.find((item) => item.id === product.id)!
 
 describe('VersionedRetailRuntime field-level semantics', () => {
+  it('rejects deletion of a referenced category before recording the operation', () => {
+    const runtime = new VersionedRetailRuntime({
+      products: [product],
+      categories: [{ id: 'c-drinks', name: 'Drinks', nameAr: '', description: '', updatedAt: 1 }],
+    })
+    const deletion: VersionedRetailOperation = {
+      schemaVersion: 2,
+      operationId: 'delete-referenced-category',
+      replicaId: 'replica-a',
+      version: { logicalTime: 1, replicaId: 'replica-a', operationId: 'delete-referenced-category' },
+      kind: 'category.delete',
+      categoryId: 'c-drinks',
+    }
+
+    expect(() => runtime.apply(deletion)).toThrow('referenced by products')
+    expect(runtime.operationIds()).not.toContain(deletion.operationId)
+    expect(runtime.catalog().categories).toHaveLength(1)
+  })
+
+  it('rejects deletion of a nonexistent category', () => {
+    const runtime = new VersionedRetailRuntime({ products: [], categories: [] })
+    const deletion: VersionedRetailOperation = {
+      schemaVersion: 2,
+      operationId: 'delete-missing-category',
+      replicaId: 'replica-a',
+      version: { logicalTime: 1, replicaId: 'replica-a', operationId: 'delete-missing-category' },
+      kind: 'category.delete',
+      categoryId: 'missing',
+    }
+
+    expect(() => runtime.apply(deletion)).toThrow('does not exist')
+    expect(runtime.operationIds()).toEqual([])
+  })
   it('preserves concurrent edits to different fields', () => {
     const name = patch('a-name', 'replica-a', 1, { name: 'Premium Coffee' })
     const price = patch('b-price', 'replica-b', 1, { price: 120 })
@@ -162,19 +195,19 @@ describe('VersionedRetailRuntime field-level semantics', () => {
       },
       {
         schemaVersion: 2,
-        operationId: 'category-delete',
-        replicaId: 'replica-a',
-        version: { logicalTime: 7, replicaId: 'replica-a', operationId: 'category-delete' },
-        kind: 'category.delete',
-        categoryId: 'c-drinks',
-      },
-      {
-        schemaVersion: 2,
         operationId: 'delete-final',
         replicaId: 'replica-b',
         version: { logicalTime: 8, replicaId: 'replica-b', operationId: 'delete-final' },
         kind: 'product.delete',
         productId: product.id,
+      },
+      {
+        schemaVersion: 2,
+        operationId: 'category-delete',
+        replicaId: 'replica-a',
+        version: { logicalTime: 9, replicaId: 'replica-a', operationId: 'category-delete' },
+        kind: 'category.delete',
+        categoryId: 'c-drinks',
       },
     ]
     const uninterrupted = new VersionedRetailRuntime({ products: [product], categories: [] })

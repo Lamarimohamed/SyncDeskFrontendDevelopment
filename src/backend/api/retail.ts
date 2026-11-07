@@ -102,6 +102,10 @@ export class RetailDomainRuntime {
         ),
       }
     } else if (operation.kind === 'category.delete') {
+      if (!this.catalog.categories.some((category) => category.id === operation.categoryId))
+        throw new Error('Cannot delete a category that does not exist')
+      if (this.catalog.products.some((product) => product.categoryId === operation.categoryId))
+        throw new Error('Cannot delete a category referenced by products')
       this.catalog = { ...this.catalog, categories: this.catalog.categories.filter((category) => category.id !== operation.categoryId) }
     }
     this.replica.add(`retail:${operation.operationId}`)

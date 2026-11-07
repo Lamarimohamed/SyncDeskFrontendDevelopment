@@ -45,6 +45,7 @@ export class VersionedRetailRuntime {
 
   apply(operation: VersionedRetailOperation): "applied" | "duplicate" {
     if (this.applied.has(operation.operationId)) return "duplicate"
+    this.validateDomainOperation(operation)
     this.applied.add(operation.operationId)
     const version = operation.version
     if (operation.kind === "product.patch") {
@@ -57,6 +58,7 @@ export class VersionedRetailRuntime {
             record.fields = { ...record.fields, [field]: value }
             record.fieldVersions[field] = version
           }
+
         }
     } else if (operation.kind === "product.delete") {
       const record = this.products.get(operation.productId)
@@ -138,6 +140,19 @@ export class VersionedRetailRuntime {
       }
     }
     return "applied"
+  }
+
+  validate(operation: VersionedRetailOperation): void {
+    if (!this.applied.has(operation.operationId)) this.validateDomainOperation(operation)
+  }
+
+  private validateDomainOperation(operation: VersionedRetailOperation): void {
+    if (operation.kind === "category.delete") {
+      const record = this.categories.get(operation.categoryId)
+      if (!record || record.tombstone) throw new Error("Cannot delete a category that does not exist")
+      if ([...this.products.values()].some((product) => !product.tombstone && product.fields.categoryId === operation.categoryId))
+        throw new Error("Cannot delete a category referenced by products")
+    }
   }
 
   catalog(): { products: Product[]; categories: Category[] } {

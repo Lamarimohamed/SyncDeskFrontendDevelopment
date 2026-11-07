@@ -542,6 +542,9 @@ export class MockRepository implements Repository {
         metadata.categoryFields[operation.categoryId] = versions
       }
     } else if (operation.kind === 'category.delete') {
+      const category = this.data.categories.find((item) => item.id === operation.categoryId)
+      if (!category || this.data.products.some((product) => product.categoryId === operation.categoryId))
+        return
       const currentVersion = metadata.categoryTombstones[operation.categoryId]
       if (!currentVersion || compareRetailVersions(operation.version, currentVersion) > 0) {
         metadata.categoryTombstones[operation.categoryId] = operation.version

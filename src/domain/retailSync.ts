@@ -309,13 +309,13 @@ export const validateVersionedRetailOperation = (
       categoryId,
       changes: validateCategoryPatch(operation.changes),
     }
+  }
 
-    if (operation.kind === 'category.delete') {
-      if (!isIdentifier(operation.categoryId)) return invalidOperation('categoryId is invalid')
-      if (!hasOnlyKeys(operation, ['schemaVersion', 'operationId', 'replicaId', 'version', 'kind', 'categoryId']))
-        invalidOperation('category.delete contains unknown fields')
-      return operation as unknown as VersionedRetailOperation
-    }
+  if (operation.kind === 'category.delete') {
+    if (!isIdentifier(operation.categoryId)) return invalidOperation('categoryId is invalid')
+    if (!hasOnlyKeys(operation, ['schemaVersion', 'operationId', 'replicaId', 'version', 'kind', 'categoryId']))
+      invalidOperation('category.delete contains unknown fields')
+    return operation as unknown as VersionedRetailOperation
   }
 
   if (operation.kind === 'inventory.adjust') {

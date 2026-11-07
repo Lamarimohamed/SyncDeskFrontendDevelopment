@@ -38,6 +38,42 @@ const operation = (changes: Record<string, unknown> = {}): Record<string, unknow
 })
 
 describe('versioned retail operation primitives', () => {
+  it('validates category deletion as a distinct operation', () => {
+    expect(() =>
+      validateVersionedRetailOperation({
+        schemaVersion: 2,
+        operationId: 'category-delete',
+        replicaId: 'replica-a',
+        version: version('category-delete', 'replica-a', 1),
+        kind: 'category.delete',
+        categoryId: 'c1',
+      }),
+    ).not.toThrow()
+  })
+
+  it('rejects malformed category operations', () => {
+    expect(() =>
+      validateVersionedRetailOperation({
+        schemaVersion: 2,
+        operationId: 'bad-category',
+        replicaId: 'replica-a',
+        version: version('bad-category', 'replica-a', 1),
+        kind: 'category.patch',
+        categoryId: '',
+        changes: { name: '' },
+      }),
+    ).toThrow()
+    expect(() =>
+      validateVersionedRetailOperation({
+        schemaVersion: 2,
+        operationId: 'unsupported-category',
+        replicaId: 'replica-a',
+        version: version('unsupported-category', 'replica-a', 1),
+        kind: 'category.rename',
+        categoryId: 'c1',
+      }),
+    ).toThrow()
+  })
   it('compares versions by logical time, then UTF-8 replica and operation bytes', () => {
     expect(compareRetailVersions(version('b', 'a', 2), version('a', 'z', 1))).toBeGreaterThan(0)
     expect(compareRetailVersions(version('a', 'replica-b', 2), version('a', 'replica-a', 2))).toBeGreaterThan(0)

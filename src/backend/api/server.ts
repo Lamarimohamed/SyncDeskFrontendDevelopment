@@ -431,6 +431,7 @@ export const createBackendServer = (
         const results = body.operations.map((value) => {
           const operation = validateVersionedRetailOperation(value)
           options.versionedOperationStage?.("beforeAppend", operation)
+          versionedRuntime.validate(operation)
           const result = log.append(operation)
           if (result.status === "accepted") {
             options.versionedOperationStage?.("afterAppend", operation)
