@@ -77,6 +77,20 @@ export function SyncStatusPage() {
       ) : null}
 
       <div className="space-y-6">
+        {snap.latestStockOutcome ? (
+          <Card>
+            <CardHeader title="Latest stock operation" description={`Operation ${snap.latestStockOutcome.operationId}`} />
+            <CardBody>
+              <p className="type-body text-fg">
+                Result: <strong>{snap.latestStockOutcome.status}</strong>
+              </p>
+              {snap.latestStockOutcome.reason ? <p className="type-body-sm mt-1 text-fg2">{snap.latestStockOutcome.reason}</p> : null}
+              <p className="type-caption mt-2 text-muted">
+                This result came from the canonical stock ledger after synchronization.
+              </p>
+            </CardBody>
+          </Card>
+        ) : null}
         <Card>
           <CardBody className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
             <div className="min-w-0 space-y-3">

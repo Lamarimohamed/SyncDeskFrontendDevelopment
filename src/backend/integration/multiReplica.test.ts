@@ -1,6 +1,9 @@
 import { request } from 'node:http'
 import { describe, expect, it } from 'vitest'
 import type { VersionedRetailOperation } from '@/domain/retailSync'
+import { createMemoryStorage } from '@/lib/storage'
+import { BackendApiClient } from '@/services/backendApi'
+import { SyncEngine } from '@/services/sync/SyncEngine'
 import { VersionedRetailRuntime } from '../sync/versionedRetailRuntime'
 import { startBackendServer } from '../api/server'
 
@@ -58,6 +61,58 @@ const patch = (
 })
 
 describe('multi-replica backend-mediated synchronization', () => {
+  it('propagates the canonical stock outcome through SyncEngine state', async () => {
+    const backend = await startBackendServer({ port: 0, replicaId: 'outcome-server' })
+    const client = new BackendApiClient(`http://127.0.0.1:${backend.port}`)
+    const engine = new SyncEngine({
+      storage: createMemoryStorage(),
+      replicaId: 'replica-outcome',
+      deviceId: 'device-outcome',
+      backendClient: client,
+      syncMs: 1,
+      autoSyncDelayMs: 1,
+      isAutoSyncEnabled: () => false,
+    })
+    const restore: VersionedRetailOperation = {
+      schemaVersion: 2,
+      operationId: 'outcome-restore',
+      replicaId: 'seed',
+      version: { logicalTime: 1, replicaId: 'seed', operationId: 'outcome-restore' },
+      kind: 'product.restore',
+      productId: 'p-outcome',
+      product: { ...product, id: 'p-outcome', stock: 0 },
+    }
+    try {
+      await client.pushVersionedOperations([restore])
+      engine.enqueue({
+        kind: 'stock.adjust',
+        entityType: 'stock',
+        entityId: 'p-outcome',
+        entityLabel: 'Coffee',
+        summary: 'Stock +1 (restock)',
+        field: 'stock',
+        crdt: 'PN-Counter',
+        discardable: false,
+        retailOperation: { operationId: 'outcome-restock', kind: 'inventory.restock', productId: 'p-outcome', tokenIds: ['outcome-token'] },
+      })
+      engine.syncNow()
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('stock outcome was not received')), 1000)
+        const unsubscribe = engine.subscribe(() => {
+          if (engine.getSnapshot().latestStockOutcome?.operationId === 'outcome-restock') {
+            clearTimeout(timeout)
+            unsubscribe()
+            resolve()
+          }
+        })
+      })
+      expect(engine.getSnapshot().latestStockOutcome).toMatchObject({ operationId: 'outcome-restock', status: 'applied' })
+    } finally {
+      engine.dispose()
+      await backend.close()
+    }
+  })
+
   it('registers independent replicas and converges concurrent catalog edits', async () => {
     const backend = await startBackendServer({ port: 0, replicaId: 'integration-server' })
     try {

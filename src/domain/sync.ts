@@ -114,7 +114,9 @@ export interface SyncSnapshot {
   lastError: string | null
   remoteWaiting: number
   counters: SyncCounters
+  latestStockOutcome: StockOperationOutcome | null
 }
 
 export type MetricProvenance = 'real' | 'simulated' | 'unavailable'
 import type { RetailOperation, VersionedRetailOperation } from './retailSync'
+import type { StockOperationOutcome } from './stock'

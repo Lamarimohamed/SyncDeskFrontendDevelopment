@@ -13,6 +13,7 @@ import { readJson, writeJson, type KeyValueStorage } from '@/lib/storage'
 import { loadOrCreateInstallationIdentity } from '@/lib/installationIdentity'
 import type { BackendApiClient } from '@/services/backendApi'
 import type { RetailOperation, VersionedRetailOperation } from '@/domain/retailSync'
+import type { StockOperationOutcome } from '@/domain/stock'
 
 /**
  * Browser synchronization coordinator. Local UI writes remain optimistic,
@@ -51,6 +52,7 @@ interface Persisted {
   cursor: number
   logicalTime: number
   appliedOperationIds: string[]
+  latestStockOutcome?: StockOperationOutcome | null
 }
 
 const STORAGE_KEY = 'syncdesk.sync.v1'
@@ -77,6 +79,7 @@ export class SyncEngine {
   private cursor: number
   private logicalTime: number
   private appliedOperationIds: Set<string>
+  private latestStockOutcome: StockOperationOutcome | null
 
   constructor(options: SyncEngineOptions) {
     const saved = readJson<Persisted | null>(options.storage, STORAGE_KEY, null)
@@ -100,6 +103,7 @@ export class SyncEngine {
     this.cursor = saved?.cursor ?? 0
     this.logicalTime = saved?.logicalTime ?? 0
     this.appliedOperationIds = new Set(saved?.appliedOperationIds ?? [])
+    this.latestStockOutcome = saved?.latestStockOutcome ?? null
     this.remote = saved?.remote ?? []
     this.snapshot = {
       replicaId: this.replicaId,
@@ -112,6 +116,7 @@ export class SyncEngine {
       lastError: null,
       remoteWaiting: this.remote.length,
       counters: saved?.counters ?? { bytesSent: 0, bytesReceived: 0, mergeCount: 0, conflictCount: 0, lastMergeAt: null },
+      latestStockOutcome: saved?.latestStockOutcome ?? null,
     }
     this.snapshot.pending = this.snapshot.pending.map((change) => {
       if (change.versionedOperation || !change.retailOperation) return change
@@ -288,7 +293,16 @@ export class SyncEngine {
     if (this.opts.backendClient && local.length > 0) {
       try {
         const versioned = local.flatMap((change) => change.versionedOperation ? [change.versionedOperation] : [])
-        if (versioned.length > 0) await this.opts.backendClient.pushVersionedOperations(versioned)
+        if (versioned.length > 0) {
+          const results = await this.opts.backendClient.pushVersionedOperations(versioned)
+          const outcomes = results
+            .map((result) => result.stockOutcome)
+            .filter((outcome): outcome is StockOperationOutcome => Boolean(outcome))
+          if (outcomes.length > 0) {
+            this.latestStockOutcome = outcomes[outcomes.length - 1]
+            this.update({ latestStockOutcome: this.latestStockOutcome })
+          }
+        }
         const legacy = local.filter((change) => !change.versionedOperation)
         if (legacy.length > 0) await this.opts.backendClient.syncChanges(this.replicaId, legacy)
       } catch (error) {
@@ -359,6 +373,7 @@ export class SyncEngine {
         conflictCount: c.conflictCount + conflicts.length,
         lastMergeAt: at,
       },
+      latestStockOutcome: this.latestStockOutcome,
     })
     this.inFlight = new Set()
     if (rest.length > 0 && this.opts.isAutoSyncEnabled()) this.scheduleAutoSync()
