@@ -61,6 +61,84 @@ const patch = (
 })
 
 describe('multi-replica backend-mediated synchronization', () => {
+  it('completes catalog creation, update, referential rejection, and convergence', async () => {
+    const backend = await startBackendServer({ port: 0, replicaId: 'catalog-server' })
+    const category: VersionedRetailOperation = {
+      schemaVersion: 2,
+      operationId: 'catalog-category',
+      replicaId: 'replica-a',
+      version: { logicalTime: 1, replicaId: 'replica-a', operationId: 'catalog-category' },
+      kind: 'category.patch',
+      categoryId: 'c-catalog',
+      changes: { name: 'Drinks', nameAr: '', description: 'Beverages' },
+    }
+    const restore: VersionedRetailOperation = {
+      schemaVersion: 2,
+      operationId: 'catalog-product',
+      replicaId: 'replica-a',
+      version: { logicalTime: 2, replicaId: 'replica-a', operationId: 'catalog-product' },
+      kind: 'product.restore',
+      productId: 'p-catalog',
+      product: { ...product, id: 'p-catalog', categoryId: 'c-catalog' },
+    }
+    const update: VersionedRetailOperation = {
+      schemaVersion: 2,
+      operationId: 'catalog-update',
+      replicaId: 'replica-b',
+      version: { logicalTime: 3, replicaId: 'replica-b', operationId: 'catalog-update' },
+      kind: 'product.patch',
+      productId: 'p-catalog',
+      changes: { price: 125 },
+    }
+    try {
+      const pushed = await httpRequest(backend.port, 'POST', '/v1/sync/operations', { operations: [category, restore, update] })
+      expect(pushed.body.accepted).toBe(3)
+
+      const blockedDelete = await httpRequest(backend.port, 'POST', '/v1/sync/operations', {
+        operations: [{
+          schemaVersion: 2,
+          operationId: 'catalog-blocked-delete',
+          replicaId: 'replica-b',
+          version: { logicalTime: 4, replicaId: 'replica-b', operationId: 'catalog-blocked-delete' },
+          kind: 'category.delete',
+          categoryId: 'c-catalog',
+        }],
+      })
+      expect(blockedDelete.status).toBe(400)
+
+      const replicas = [new VersionedRetailRuntime(), new VersionedRetailRuntime()]
+      const page = await httpRequest(backend.port, 'GET', '/v1/sync/operations?after=0&limit=100')
+      for (const replica of replicas)
+        for (const entry of page.body.operations as Array<{ operation: VersionedRetailOperation }>) replica.apply(entry.operation)
+      expect(replicas[0].catalog()).toEqual(replicas[1].catalog())
+      expect(replicas[0].catalog().products[0]).toMatchObject({ categoryId: 'c-catalog', price: 125 })
+
+      const deleteProduct: VersionedRetailOperation = {
+        schemaVersion: 2,
+        operationId: 'catalog-delete-product',
+        replicaId: 'replica-a',
+        version: { logicalTime: 5, replicaId: 'replica-a', operationId: 'catalog-delete-product' },
+        kind: 'product.delete',
+        productId: 'p-catalog',
+      }
+      const deleteCategory: VersionedRetailOperation = {
+        schemaVersion: 2,
+        operationId: 'catalog-delete-category',
+        replicaId: 'replica-a',
+        version: { logicalTime: 6, replicaId: 'replica-a', operationId: 'catalog-delete-category' },
+        kind: 'category.delete',
+        categoryId: 'c-catalog',
+      }
+      expect((await httpRequest(backend.port, 'POST', '/v1/sync/operations', { operations: [deleteProduct, deleteCategory] })).body.accepted).toBe(2)
+      const finalPage = await httpRequest(backend.port, 'GET', '/v1/sync/operations?after=3&limit=100')
+      for (const replica of replicas)
+        for (const entry of finalPage.body.operations as Array<{ operation: VersionedRetailOperation }>) replica.apply(entry.operation)
+      expect(replicas[0].catalog()).toEqual({ products: [], categories: [] })
+    } finally {
+      await backend.close()
+    }
+  })
+
   it('propagates the canonical stock outcome through SyncEngine state', async () => {
     const backend = await startBackendServer({ port: 0, replicaId: 'outcome-server' })
     const client = new BackendApiClient(`http://127.0.0.1:${backend.port}`)
