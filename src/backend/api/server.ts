@@ -444,7 +444,7 @@ export const createBackendServer = (
             persistRecovery({ schemaVersion: 1, status: "complete", logPosition: result.position })
             options.versionedOperationStage?.("afterCheckpoint", operation)
           }
-          return { operationId: operation.operationId, ...result }
+          return { operationId: operation.operationId, ...result, stockOutcome: versionedRuntime.stockOutcome(operation.operationId) }
         })
         json(response, 200, { results, accepted: results.filter((result) => result.status === "accepted").length, persisted: true })
       }).catch((error: unknown) => {

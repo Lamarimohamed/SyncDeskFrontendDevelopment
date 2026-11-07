@@ -2,7 +2,7 @@ import { ReplicaRuntime } from '@/backend/crdt/replica'
 import { createStateMessage, encodeSyncMessage, type StateSyncMessage } from '@/backend/sync/protocol'
 import type { PendingChange } from '@/domain/sync'
 import type { RetailCatalog, RetailOperation, RetailOperationResult, VersionedRetailOperation } from '@/domain/retailSync'
-import type { EscrowedStockState } from '@/domain/stock'
+import type { EscrowedStockState, StockOperationOutcome } from '@/domain/stock'
 
 export interface BackendHealth {
   status: 'ok'
@@ -52,6 +52,7 @@ export interface SyncOperationResult {
   operationId: string
   status: 'accepted' | 'duplicate'
   position: number
+  stockOutcome?: StockOperationOutcome
 }
 
 export interface SyncOperationPage {

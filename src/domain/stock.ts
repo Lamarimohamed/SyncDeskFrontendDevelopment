@@ -53,6 +53,14 @@ export interface StockSnapshot {
   decrementComponents: Record<string, number>
 }
 
+export type StockOperationOutcomeStatus = 'applied' | 'rejected' | 'no-effect' | 'duplicate' | 'conflict'
+
+export interface StockOperationOutcome {
+  operationId: string
+  status: StockOperationOutcomeStatus
+  reason?: string
+}
+
 export const initialStockState = (
   stock: number,
   owner: string,
@@ -93,11 +101,12 @@ export class EscrowedStock {
     return new EscrowedStock(replicaId, initialStockState(stock, replicaId, prefix))
   }
 
-  apply(operation: StockOperation): 'applied' | 'duplicate' {
+  apply(operation: StockOperation): StockOperationOutcome {
     const existing = this.operations.get(operation.operationId)
     if (existing) {
-      if (JSON.stringify(existing) !== JSON.stringify(operation)) throw new Error('Conflicting stock operation identity')
-      return 'duplicate'
+      if (JSON.stringify(existing) !== JSON.stringify(operation))
+        return { operationId: operation.operationId, status: 'conflict', reason: 'Conflicting stock operation identity' }
+      return { operationId: operation.operationId, status: 'duplicate' }
     }
     if (
       operation.kind === 'inventory.transfer' &&
@@ -105,14 +114,33 @@ export class EscrowedStock {
         (candidate) => candidate.kind === 'inventory.transfer' && candidate.transferId === operation.transferId,
       )
     )
-      return 'duplicate'
-    if (!this.isStructurallyValid(operation)) throw new Error('Invalid stock operation')
+      return { operationId: operation.operationId, status: 'duplicate', reason: 'Transfer identity was already processed' }
+    if (!this.isStructurallyValid(operation))
+      return { operationId: operation.operationId, status: 'rejected', reason: 'Invalid stock operation' }
+    const before = this.snapshotValue
     this.operations.set(operation.operationId, structuredClone(operation))
     this.state.operations = [...this.operations.values()].sort((left, right) =>
       compareRetailVersions(left.version, right.version),
     )
     this.snapshotValue = this.recompute()
-    return 'applied'
+    const changed = JSON.stringify({
+      value: before.value,
+      availableRights: before.availableRights,
+      tokens: before.tokens,
+      incrementComponents: before.incrementComponents,
+      decrementComponents: before.decrementComponents,
+    }) !== JSON.stringify({
+      value: this.snapshotValue.value,
+      availableRights: this.snapshotValue.availableRights,
+      tokens: this.snapshotValue.tokens,
+      incrementComponents: this.snapshotValue.incrementComponents,
+      decrementComponents: this.snapshotValue.decrementComponents,
+    })
+    return {
+      operationId: operation.operationId,
+      status: changed ? 'applied' : 'no-effect',
+      ...(changed ? {} : { reason: 'Operation produced no stock state change' }),
+    }
   }
 
   retire(replicaId: string): void {

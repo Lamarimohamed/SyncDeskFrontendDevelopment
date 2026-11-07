@@ -1,5 +1,5 @@
 import type { Category, Product } from "../../domain/types"
-import { EscrowedStock, type EscrowedStockState, type StockOperation } from "../../domain/stock"
+import { EscrowedStock, type EscrowedStockState, type StockOperation, type StockOperationOutcome } from "../../domain/stock"
 import {
   compareRetailVersions,
   type VersionedProductField,
@@ -24,6 +24,7 @@ export class VersionedRetailRuntime {
   private readonly categories = new Map<string, CategoryRecord>()
   private readonly inventory = new Map<string, number>()
   private readonly stocks = new Map<string, EscrowedStock>()
+  private readonly stockOutcomes = new Map<string, StockOperationOutcome>()
 
   constructor(
     initial: { products: Product[]; categories: Category[] } = { products: [], categories: [] },
@@ -111,22 +112,28 @@ export class VersionedRetailRuntime {
                   .map(([tokenId]) => tokenId)
               : []
         if (operation.delta > 0) {
-          stock.apply({
+          this.stockOutcomes.set(operation.operationId, stock.apply({
             operationId: operation.operationId,
             productId: operation.productId,
             replicaId: operation.replicaId,
             version,
             kind: "inventory.restock",
             tokenIds,
-          })
+          }))
         } else if (tokenIds.length === Math.abs(operation.delta)) {
-          stock.apply({
+          this.stockOutcomes.set(operation.operationId, stock.apply({
             operationId: operation.operationId,
             productId: operation.productId,
             replicaId: operation.replicaId,
             version,
             kind: "inventory.decrement",
             tokenIds,
+          }))
+        } else {
+          this.stockOutcomes.set(operation.operationId, {
+            operationId: operation.operationId,
+            status: "no-effect",
+            reason: "Insufficient rights for decrement",
           })
         }
         this.setStockValue(operation.productId, stock.value())
@@ -134,7 +141,7 @@ export class VersionedRetailRuntime {
     } else {
       const stock = this.stocks.get(operation.productId)
       if (stock) {
-        stock.apply(operation as StockOperation)
+        this.stockOutcomes.set(operation.operationId, stock.apply(operation as StockOperation))
         this.setStockValue(operation.productId, stock.value())
       }
     }
@@ -143,6 +150,11 @@ export class VersionedRetailRuntime {
 
   validate(operation: VersionedRetailOperation): void {
     if (!this.applied.has(operation.operationId)) this.validateDomainOperation(operation)
+  }
+
+  stockOutcome(operationId: string): StockOperationOutcome | undefined {
+    const outcome = this.stockOutcomes.get(operationId)
+    return outcome ? structuredClone(outcome) : undefined
   }
 
   private validateDomainOperation(operation: VersionedRetailOperation): void {

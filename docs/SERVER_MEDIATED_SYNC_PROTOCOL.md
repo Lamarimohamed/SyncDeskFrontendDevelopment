@@ -221,8 +221,10 @@ for one identity are rejected, and transfer IDs are also deduplicated. Replay
 sorts operations by the existing deterministic retail version order, so
 delayed or out-of-order delivery converges once every accepted operation is
 available. A local replica may see stale global stock while disconnected; it
-cannot spend rights it does not own, and an exhausted decrement is rejected
-instead of being queued as a successful operation.
+cannot spend rights it does not own. Outcomes distinguish applied, rejected,
+no-effect, duplicate, and conflicting operations; an exhausted or foreign-token
+decrement is recorded as no-effect rather than reported as a successful stock
+mutation.
 
 The initial allocation is explicit in the persisted token state. Replica
 registration does not create rights or stock. Retirement and administrative

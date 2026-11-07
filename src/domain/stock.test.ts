@@ -38,7 +38,7 @@ describe('EscrowedStock', () => {
     const token = Object.keys(stock.snapshot().tokens)[0]
     stock.apply(operation('a', 'dec', 'inventory.decrement', [token]))
     expect(stock.availableRights('a')).toBe(0)
-    expect(() => stock.apply(operation('a', 'bad', 'inventory.decrement', [token]))).not.toThrow()
+    expect(stock.apply(operation('a', 'zbad', 'inventory.decrement', [token])).status).toBe('no-effect')
     expect(stock.value()).toBe(0)
   })
 
@@ -58,7 +58,7 @@ describe('EscrowedStock', () => {
     second.apply(transfer)
     second.apply(decrement)
     expect(first.snapshot()).toEqual(second.snapshot())
-    expect(first.apply(transfer)).toBe('duplicate')
+    expect(first.apply(transfer).status).toBe('duplicate')
   })
 
   it('replays restock and operations deterministically', () => {
@@ -67,6 +67,25 @@ describe('EscrowedStock', () => {
     stock.apply(restock)
     const replay = new EscrowedStock('a', stock.stateSnapshot())
     expect(replay.value()).toBe(1)
-    expect(replay.apply(restock)).toBe('duplicate')
+    expect(replay.apply(restock).status).toBe('duplicate')
+  })
+
+  it('reports rejected, no-effect, and conflicting outcomes without mutation', () => {
+    const stock = EscrowedStock.create('a', 1, 'seed')
+    const token = Object.keys(stock.snapshot().tokens)[0]
+    const malformed = operation('a', 'malformed', 'inventory.decrement', [])
+    const rejected = stock.apply(malformed)
+    expect(rejected.status).toBe('rejected')
+    expect(stock.value()).toBe(1)
+
+    const noEffect = stock.apply(operation('b', 'foreign', 'inventory.decrement', [token]))
+    expect(noEffect.status).toBe('no-effect')
+    expect(stock.value()).toBe(1)
+
+    const accepted = stock.apply(operation('a', 'conflicting', 'inventory.decrement', [token]))
+    expect(accepted.status).toBe('applied')
+    const conflict = stock.apply({ ...operation('a', 'conflicting', 'inventory.decrement', []), tokenIds: [] })
+    expect(conflict.status).toBe('conflict')
+    expect(stock.value()).toBe(0)
   })
 })
