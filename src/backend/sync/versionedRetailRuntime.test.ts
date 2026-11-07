@@ -35,7 +35,54 @@ const patch = (
 const catalogProduct = (runtime: VersionedRetailRuntime): Product =>
   runtime.catalog().products.find((item) => item.id === product.id)!
 
+const categoryPatch = (
+  operationId: string,
+  replicaId: string,
+  logicalTime: number,
+  changes: { name?: string; nameAr?: string; description?: string },
+): VersionedRetailOperation => ({
+  schemaVersion: 2,
+  operationId,
+  replicaId,
+  version: { logicalTime, replicaId, operationId },
+  kind: 'category.patch',
+  categoryId: 'c-drinks',
+  changes,
+})
+
 describe('VersionedRetailRuntime field-level semantics', () => {
+  it('preserves concurrent edits to different category fields', () => {
+    const name = categoryPatch('a-category-name', 'replica-a', 1, { name: 'Hot drinks' })
+    const description = categoryPatch('b-category-description', 'replica-b', 1, { description: 'Beverages' })
+    const initial = [{ id: 'c-drinks', name: 'Drinks', nameAr: '', description: '', updatedAt: 1 }]
+    const first = new VersionedRetailRuntime({ products: [], categories: initial })
+    const second = new VersionedRetailRuntime({ products: [], categories: initial })
+
+    first.apply(name)
+    first.apply(description)
+    second.apply(description)
+    second.apply(name)
+
+    expect(first.catalog()).toEqual(second.catalog())
+    expect(first.catalog().categories[0]).toMatchObject({ name: 'Hot drinks', description: 'Beverages' })
+  })
+
+  it('resolves same-field category conflicts independent of delivery order', () => {
+    const left = categoryPatch('a-category', 'replica-a', 1, { name: 'A' })
+    const right = categoryPatch('b-category', 'replica-b', 1, { name: 'B' })
+    const initial = [{ id: 'c-drinks', name: 'Drinks', nameAr: '', description: '', updatedAt: 1 }]
+    const first = new VersionedRetailRuntime({ products: [], categories: initial })
+    const second = new VersionedRetailRuntime({ products: [], categories: initial })
+
+    first.apply(left)
+    first.apply(right)
+    second.apply(right)
+    second.apply(left)
+
+    expect(first.catalog()).toEqual(second.catalog())
+    expect(first.catalog().categories[0].name).toBe('B')
+  })
+
   it('rejects deletion of a referenced category before recording the operation', () => {
     const runtime = new VersionedRetailRuntime({
       products: [product],

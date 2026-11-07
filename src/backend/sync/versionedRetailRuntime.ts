@@ -58,7 +58,6 @@ export class VersionedRetailRuntime {
             record.fields = { ...record.fields, [field]: value }
             record.fieldVersions[field] = version
           }
-
         }
     } else if (operation.kind === "product.delete") {
       const record = this.products.get(operation.productId)

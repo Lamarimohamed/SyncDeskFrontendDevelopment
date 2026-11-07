@@ -169,6 +169,14 @@ establishes its version as the baseline for subsequent field patches. Older
 deletes, restores, and patches cannot overwrite that state. This policy is
 implemented in both the server projection and browser repository metadata.
 
+Category patches use the same per-field total order and therefore converge
+independently of delivery order. Category deletion is intentionally strict:
+the category must exist and have no live product references. A deleted
+category has no restore operation in schema version 2, and stale or later
+category patches do not make its tombstone visible again. This preserves
+referential integrity but means category recreation requires a distinct
+identifier.
+
 ## Persistence and observability
 
 The log is durably persisted through the existing atomic file store, and the
