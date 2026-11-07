@@ -41,6 +41,7 @@ export interface EscrowedStockState {
   initialTokens: Record<string, string>
   operations: StockOperation[]
   retiredReplicaIds: string[]
+  allocations?: Record<string, string>
 }
 
 export interface StockSnapshot {
@@ -62,6 +63,7 @@ export const initialStockState = (
   ),
   operations: [],
   retiredReplicaIds: [],
+  allocations: {},
 })
 
 const cloneState = (state: EscrowedStockState): EscrowedStockState => structuredClone(state)
@@ -118,6 +120,23 @@ export class EscrowedStock {
       this.state.retiredReplicaIds.push(replicaId)
   }
 
+  allocate(replicaId: string, count: number): number {
+    if (!replicaId || !Number.isSafeInteger(count) || count < 0)
+      throw new Error('Invalid stock allocation')
+    let remaining = count
+    const tokenIds = Object.entries(this.snapshotValue.tokens)
+      .filter(([, token]) => token.owner === this.replicaId && !token.consumedBy)
+      .map(([tokenId]) => tokenId)
+    this.state.allocations ??= {}
+    for (const tokenId of tokenIds) {
+      if (remaining === 0) break
+      this.state.allocations[tokenId] = replicaId
+      remaining -= 1
+    }
+    this.snapshotValue = this.recompute()
+    return count - remaining
+  }
+
   availableRights(replicaId = this.replicaId): number {
     return this.snapshotValue.availableRights[replicaId] ?? 0
   }
@@ -167,6 +186,9 @@ export class EscrowedStock {
             tokens[tokenId] = { owner: operation.replicaId }
             accepted += 1
           }
+        }
+        for (const [tokenId, owner] of Object.entries(this.state.allocations ?? {})) {
+          if (tokens[tokenId] && !tokens[tokenId].consumedBy) tokens[tokenId].owner = owner
         }
         incrementComponents[operation.replicaId] = (incrementComponents[operation.replicaId] ?? 0) + accepted
       } else if (operation.kind === 'inventory.transfer') {

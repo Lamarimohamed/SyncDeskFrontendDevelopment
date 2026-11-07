@@ -39,6 +39,8 @@ type MergeHandler = (change: RemoteChange) => void
 type Listener = () => void
 
 interface Persisted {
+  replicaId?: string
+  deviceId?: string
   connectivity: 'online' | 'offline'
   pending: PendingChange[]
   activity: ActivityEvent[]
@@ -77,9 +79,10 @@ export class SyncEngine {
   private appliedOperationIds: Set<string>
 
   constructor(options: SyncEngineOptions) {
+    const saved = readJson<Persisted | null>(options.storage, STORAGE_KEY, null)
     const identity = options.replicaId && options.deviceId
       ? { replicaId: options.replicaId, deviceId: options.deviceId }
-      : loadOrCreateInstallationIdentity(options.storage)
+      : loadOrCreateInstallationIdentity(options.storage, undefined, saved?.replicaId)
     this.replicaId = options.replicaId ?? identity.replicaId
     this.deviceId = options.deviceId ?? identity.deviceId
     this.opts = {
@@ -94,7 +97,6 @@ export class SyncEngine {
       backendClient: options.backendClient,
       onVersionedOperation: options.onVersionedOperation,
     }
-    const saved = readJson<Persisted | null>(options.storage, STORAGE_KEY, null)
     this.cursor = saved?.cursor ?? 0
     this.logicalTime = saved?.logicalTime ?? 0
     this.appliedOperationIds = new Set(saved?.appliedOperationIds ?? [])
@@ -420,6 +422,8 @@ export class SyncEngine {
   private persist(): void {
     const s = this.snapshot
     const data: Persisted = {
+      replicaId: this.replicaId,
+      deviceId: this.deviceId,
       connectivity: s.connectivity === 'offline' ? 'offline' : 'online',
       pending: s.pending,
       activity: s.activity,

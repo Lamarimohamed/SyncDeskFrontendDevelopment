@@ -5,10 +5,8 @@ small authoritative retail operation API. It does not provide peer-to-peer
 replication.
 
 The frontend integration is opt-in through `VITE_BACKEND_URL`. When configured,
-The browser keeps its existing local repository and offline queue. Product and
-category mutations are sent as idempotent retail operations before the generic
-sync envelope is submitted. Stock mutations still use only the generic
-PN-counter envelope and are not represented as backend inventory records.
+the browser keeps its existing local repository and offline queue. Browser
+installation identity is separate from the stable backend identity.
 
 ## Start
 
@@ -106,6 +104,22 @@ register containing `null`, an empty OR-Set, and an empty PN-Counter.
 }
 ```
 
+### `GET /v1/bootstrap` and `POST /v1/bootstrap`
+
+Bootstrap returns explicit initialization metadata; clients must not infer
+readiness from catalog length. The response includes the stable
+`backendReplicaId`, protocol version, `initialization.status`, whether the
+canonical catalog is `empty` or contains `data`, the catalog, and canonical
+escrow stock states.
+
+`POST /v1/bootstrap` accepts a browser `replicaId` and is idempotent. A new
+browser may request a non-negative number of rights per product. The backend
+allocates only currently unallocated server-owned tokens and records the
+allocation for that browser. Repeating registration does not grant additional
+rights, and connecting a browser does not reset catalog or operation history.
+An unavailable backend leaves the browser's local state and pending queue
+unchanged.
+
 ### `POST /v1/sync/messages`
 
 Accepts one existing version-1 `StateSyncMessage` JSON object. The server
@@ -169,7 +183,7 @@ the candidate catalog and its CRDT operation marker have been persisted.
 | Delete product | `product.delete` | Product ID plus OR-Set marker | Authoritative removal; no tombstone exchange between replicas |
 | Create/edit category | `category.upsert` | Whole validated `Category` plus OR-Set marker and PN-counter increment | Authoritative last received whole-record write |
 | Delete category | `category.delete` | Category ID plus OR-Set marker | Authoritative removal; product-reference validation remains frontend-local |
-| Stock adjustment | Not supported by retail API | Existing generic PN-counter envelope only | No backend stock projection or inventory guarantee |
+| Stock adjustment | Versioned escrow operations | Canonical token ledger and persisted allocation state | Decrement requires ownership of allocated rights |
 
 The OR-Set marker and counter provide durable operation accounting using the
 existing CRDT types. They do not make the catalog itself a multi-replica CRDT.

@@ -2,10 +2,26 @@ import { ReplicaRuntime } from '@/backend/crdt/replica'
 import { createStateMessage, encodeSyncMessage, type StateSyncMessage } from '@/backend/sync/protocol'
 import type { PendingChange } from '@/domain/sync'
 import type { RetailCatalog, RetailOperation, RetailOperationResult, VersionedRetailOperation } from '@/domain/retailSync'
+import type { EscrowedStockState } from '@/domain/stock'
 
 export interface BackendHealth {
   status: 'ok'
   apiVersion: string
+}
+
+export interface BackendBootstrapResponse {
+  apiVersion: string
+  protocolVersion: string
+  backendReplicaId: string
+  initialization: {
+    status: 'initialized'
+    catalogState: 'empty' | 'data'
+    initializedAt: number
+    registeredReplicaCount: number
+  }
+  catalog: RetailCatalog
+  stockStates: Record<string, EscrowedStockState>
+  allocation?: Record<string, number>
 }
 
 export interface BackendReplicaResponse {
@@ -113,6 +129,38 @@ export class BackendApiClient {
 
   async getReplica(): Promise<BackendReplicaResponse> {
     return this.request<BackendReplicaResponse>('/v1/replica')
+  }
+
+  async getBootstrap(): Promise<BackendBootstrapResponse> {
+    const response = await this.request<BackendBootstrapResponse>('/v1/bootstrap')
+    if (
+      response.apiVersion !== '1' ||
+      response.protocolVersion !== 'syncdesk-retail-v2' ||
+      !response.backendReplicaId ||
+      response.initialization?.status !== 'initialized' ||
+      !['empty', 'data'].includes(response.initialization.catalogState)
+    )
+      throw new BackendApiError(200, 'incompatible_backend', 'The backend does not support this application protocol.')
+    return { ...response, catalog: validateCatalog(response.catalog) }
+  }
+
+  async registerReplica(
+    replicaId: string,
+    requestedRights?: Record<string, number>,
+  ): Promise<BackendBootstrapResponse> {
+    const response = await this.request<BackendBootstrapResponse>('/v1/bootstrap', {
+      method: 'POST',
+      body: JSON.stringify({ replicaId, requestedRights }),
+      headers: { 'content-type': 'application/json' },
+    })
+    if (
+      response.apiVersion !== '1' ||
+      response.protocolVersion !== 'syncdesk-retail-v2' ||
+      response.backendReplicaId === replicaId ||
+      response.initialization?.status !== 'initialized'
+    )
+      throw new BackendApiError(200, 'incompatible_backend', 'The backend returned an incompatible bootstrap response.')
+    return { ...response, catalog: validateCatalog(response.catalog) }
   }
 
   async syncChanges(

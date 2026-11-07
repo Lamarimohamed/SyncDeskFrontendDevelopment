@@ -62,6 +62,25 @@ const versionedPatch = (index: number): VersionedRetailOperation => ({
 })
 
 describe('BackendApiClient', () => {
+  it('rejects an incompatible bootstrap response explicitly', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({
+        apiVersion: '1',
+        protocolVersion: 'old-protocol',
+        backendReplicaId: 'backend',
+        initialization: { status: 'initialized', catalogState: 'empty', initializedAt: 1, registeredReplicaCount: 0 },
+        catalog: { products: [], categories: [] },
+        stockStates: {},
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    )
+    try {
+      await expect(new BackendApiClient('http://localhost:8787').getBootstrap())
+        .rejects.toMatchObject({ code: 'incompatible_backend' })
+    } finally {
+      fetchMock.mockRestore()
+    }
+  })
+
   it('persists a versioned offline write across browser reinitialization', async () => {
     const seed = buildSeed(1)
     const storage = createMemoryStorage()

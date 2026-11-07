@@ -149,6 +149,18 @@ export class VersionedRetailRuntime {
 
   operationIds(): string[] { return [...this.applied].sort() }
 
+  stockStates(): Record<string, EscrowedStockState> {
+    return Object.fromEntries([...this.stocks.entries()].map(([productId, stock]) => [productId, stock.stateSnapshot()]))
+  }
+
+  allocateRights(productId: string, replicaId: string, count: number): number {
+    const stock = this.stocks.get(productId)
+    if (!stock) throw new Error(`Unknown stock product: ${productId}`)
+    const allocated = stock.allocate(replicaId, count)
+    this.setStockValue(productId, stock.value())
+    return allocated
+  }
+
   private setStockValue(productId: string, value: number): void {
     const product = this.products.get(productId)
     if (product && !product.tombstone) product.fields = { ...product.fields, stock: value }

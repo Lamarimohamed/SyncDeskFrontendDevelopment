@@ -39,9 +39,9 @@ wireBrowserConnectivity(engine)
 
 if (backendClient) {
   void backendClient
-    .getRetailCatalog()
-    .then((catalog) => mockRepository.hydrateCatalog(catalog))
+    .registerReplica(engine.replicaId)
+    .then((bootstrap) => mockRepository.hydrateCatalog(bootstrap.catalog, bootstrap.stockStates))
     .catch((error: unknown) => {
-      logger.warn('REPOSITORY', 'Catalog hydration unavailable', error instanceof Error ? error.message : 'The backend catalog could not be loaded.')
+      logger.warn('REPOSITORY', 'Backend initialization unavailable', error instanceof Error ? error.message : 'The backend could not be initialized.')
     })
 }

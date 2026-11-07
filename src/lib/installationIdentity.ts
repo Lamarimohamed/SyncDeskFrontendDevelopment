@@ -37,6 +37,7 @@ const createUuid = (): string => {
 export const loadOrCreateInstallationIdentity = (
   storage: KeyValueStorage,
   randomUUID: IdentityRandomUUID = createUuid,
+  legacyReplicaId?: string,
 ): InstallationIdentity => {
   let raw: string | null
   try {
@@ -65,7 +66,7 @@ export const loadOrCreateInstallationIdentity = (
 
   const identity = {
     deviceId: `device-${randomUUID()}`,
-    replicaId: `replica-${randomUUID()}`,
+    replicaId: legacyReplicaId || `replica-${randomUUID()}`,
   }
   if (!identity.deviceId || !identity.replicaId || identity.deviceId === identity.replicaId)
     throw new InstallationIdentityError('A secure browser installation identity could not be generated.')

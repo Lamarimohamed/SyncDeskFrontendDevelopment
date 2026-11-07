@@ -47,6 +47,96 @@ const httpRequest = (
   })
 
 describe("backend HTTP API", () => {
+  it("exposes explicit initialized-empty bootstrap state and registers replicas idempotently", async () => {
+    const store = new ReplicaStore()
+    const backend = await startBackendServer({ port: 0, store, replicaId: "bootstrap-server" })
+    try {
+      const first = await httpRequest(backend.port, "GET", "/v1/bootstrap")
+      expect(first).toMatchObject({
+        status: 200,
+        body: {
+          backendReplicaId: "bootstrap-server",
+          protocolVersion: "syncdesk-retail-v2",
+          initialization: { status: "initialized", catalogState: "empty", registeredReplicaCount: 0 },
+        },
+      })
+      const registered = await httpRequest(backend.port, "POST", "/v1/bootstrap", { replicaId: "browser-a" })
+      const repeated = await httpRequest(backend.port, "POST", "/v1/bootstrap", { replicaId: "browser-a" })
+      expect(registered).toMatchObject({ status: 200, body: { initialization: { registeredReplicaCount: 1 } } })
+      expect(repeated).toMatchObject({ status: 200, body: { initialization: { registeredReplicaCount: 1 } } })
+    } finally {
+      await backend.close()
+    }
+  })
+
+  it("preserves bootstrap state and server identity across restart", async () => {
+    const store = new ReplicaStore()
+    const first = await startBackendServer({ port: 0, store, replicaId: "persistent-bootstrap" })
+    const before = await httpRequest(first.port, "GET", "/v1/bootstrap")
+    await httpRequest(first.port, "POST", "/v1/bootstrap", { replicaId: "browser-a" })
+    await first.close()
+    const restarted = await startBackendServer({ port: 0, store, replicaId: "persistent-bootstrap" })
+    try {
+      const after = await httpRequest(restarted.port, "GET", "/v1/bootstrap")
+      expect(after.body).toMatchObject({
+        backendReplicaId: "persistent-bootstrap",
+        initialization: {
+          initializedAt: (before.body as { initialization: { initializedAt: number } }).initialization.initializedAt,
+          registeredReplicaCount: 1,
+        },
+      })
+    } finally {
+      await restarted.close()
+    }
+  })
+
+  it("allocates canonical stock rights once and does not duplicate them on registration retry", async () => {
+    const store = new ReplicaStore()
+    const backend = await startBackendServer({ port: 0, store, replicaId: "allocation-server" })
+    const product = {
+      id: "p-allocation",
+      name: "Allocation product",
+      nameAr: "منتج",
+      description: "",
+      descriptionAr: "",
+      price: 10,
+      categoryId: "c",
+      availability: "available",
+      stock: 3,
+      lowStockThreshold: 1,
+      updatedAt: 1,
+    }
+    const restore = {
+      schemaVersion: 2,
+      operationId: "allocation-restore",
+      replicaId: "seed",
+      version: { logicalTime: 1, replicaId: "seed", operationId: "allocation-restore" },
+      kind: "product.restore",
+      productId: product.id,
+      product,
+    }
+    try {
+      await httpRequest(backend.port, "POST", "/v1/sync/operations", { operations: [restore] })
+      const first = await httpRequest(backend.port, "POST", "/v1/bootstrap", {
+        replicaId: "browser-a",
+        requestedRights: { [product.id]: 2 },
+      })
+      const retry = await httpRequest(backend.port, "POST", "/v1/bootstrap", {
+        replicaId: "browser-a",
+        requestedRights: { [product.id]: 3 },
+      })
+      expect(first.body).toMatchObject({ allocation: { [product.id]: 2 } })
+      expect(retry.body).toMatchObject({ allocation: { [product.id]: 2 } })
+      const states = (retry.body as {
+        stockStates: Record<string, { allocations?: Record<string, string> }>
+      }).stockStates
+      const owners = Object.values(states[product.id].allocations ?? {})
+      expect(owners.filter((owner) => owner === "browser-a")).toHaveLength(2)
+    } finally {
+      await backend.close()
+    }
+  })
+
   it("pushes, pages, deduplicates, and restores versioned operations", async () => {
     const backend = await startBackendServer({ port: 0 })
     const operation = {

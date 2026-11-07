@@ -9,8 +9,10 @@ import { DurableOperationLog, type OperationLogState } from "../sync/operationLo
 import { VersionedRetailRuntime } from "../sync/versionedRetailRuntime"
 import { validateVersionedRetailOperation, type VersionedRetailOperation } from "../../domain/retailSync"
 import { loadRetailRuntime, RetailDomainRuntime, validateRetailOperation } from "./retail"
+import { EscrowedStock, type EscrowedStockState } from "../../domain/stock"
 
 const API_VERSION = "1"
+const PROTOCOL_VERSION = "syncdesk-retail-v2"
 const MAX_BODY_BYTES = 1024 * 1024
 
 export interface ReplicaStoreLike {
@@ -62,6 +64,16 @@ interface VersionedRecoveryState {
   logPosition: number
 }
 
+interface BackendBootstrapState {
+  schemaVersion: 1
+  protocolVersion: string
+  status: "initialized"
+  initializedAt: number
+  registeredReplicaIds: string[]
+  allocations: Record<string, Record<string, number>>
+  stockStates: Record<string, EscrowedStockState>
+}
+
 const isVersionedRecoveryState = (value: unknown): value is VersionedRecoveryState =>
   isRecord(value) &&
   value.schemaVersion === 1 &&
@@ -69,6 +81,17 @@ const isVersionedRecoveryState = (value: unknown): value is VersionedRecoverySta
   typeof value.logPosition === "number" &&
   Number.isSafeInteger(value.logPosition) &&
   value.logPosition >= 0
+
+const isBootstrapState = (value: unknown): value is BackendBootstrapState =>
+  isRecord(value) &&
+  value.schemaVersion === 1 &&
+  value.protocolVersion === PROTOCOL_VERSION &&
+  value.status === "initialized" &&
+  typeof value.initializedAt === "number" &&
+  Array.isArray(value.registeredReplicaIds) &&
+  value.registeredReplicaIds.every((id) => typeof id === "string" && id.length > 0) &&
+  isRecord(value.allocations) &&
+  isRecord(value.stockStates)
 
 const json = (response: ServerResponse, status: number, body: unknown): void => {
   const encoded = JSON.stringify(body)
@@ -192,7 +215,40 @@ export const createBackendServer = (
     load: (): OperationLogState | undefined => store.load(logRecordId)?.state as OperationLogState | undefined,
     save: (state) => { store.save(logRecordId, state) },
   })
-  const versionedRuntime = new VersionedRetailRuntime(retailRuntime.getCatalog(), replicaId)
+  const bootstrapRecordId = `${replicaId}:bootstrap`
+  const storedBootstrap = store.load(bootstrapRecordId)?.state
+  let bootstrap: BackendBootstrapState
+  if (storedBootstrap !== undefined) {
+    if (!isBootstrapState(storedBootstrap))
+      throw new Error(`Invalid backend bootstrap state for replica ${replicaId}`)
+    bootstrap = structuredClone(storedBootstrap)
+  } else {
+    bootstrap = {
+      schemaVersion: 1,
+      protocolVersion: PROTOCOL_VERSION,
+      status: "initialized",
+      initializedAt: Date.now(),
+      registeredReplicaIds: [],
+      allocations: {},
+      stockStates: Object.fromEntries(
+        retailRuntime.getCatalog().products.map((product) => [
+          product.id,
+          EscrowedStock.create(replicaId, product.stock, product.id).stateSnapshot(),
+        ]),
+      ),
+    }
+    try {
+      store.save(bootstrapRecordId, bootstrap)
+    } catch {
+      // Existing callers may start the server before persistence is available.
+      // The first successful bootstrap or operation persists this state.
+    }
+  }
+  const versionedRuntime = new VersionedRetailRuntime(retailRuntime.getCatalog(), replicaId, bootstrap.stockStates)
+  const persistBootstrap = (): void => {
+    bootstrap.stockStates = versionedRuntime.stockStates()
+    store.save(bootstrapRecordId, bootstrap)
+  }
   const recoveryRecordId = `${replicaId}:versioned-recovery`
   const persistRecovery = (state: VersionedRecoveryState): void => {
     store.save(recoveryRecordId, state)
@@ -204,6 +260,7 @@ export const createBackendServer = (
   if (logEntries.length > 0 || (previousRecovery as VersionedRecoveryState | undefined)?.status === "recovering") {
     persistRecovery({ schemaVersion: 1, status: "recovering", logPosition: logEntries.at(-1)?.position ?? 0 })
     for (const entry of logEntries) versionedRuntime.apply(entry.operation)
+    persistBootstrap()
     persistRecovery({ schemaVersion: 1, status: "complete", logPosition: logEntries.at(-1)?.position ?? 0 })
   }
   let requestChain = Promise.resolve()
@@ -252,6 +309,69 @@ export const createBackendServer = (
         persisted: Boolean(record),
         updatedAt: record?.updatedAt ?? null,
       })
+      return
+    }
+
+    if (method === "GET" && path === "/v1/bootstrap") {
+      const catalog = versionedRuntime.catalog()
+      json(response, 200, {
+        apiVersion: API_VERSION,
+        protocolVersion: PROTOCOL_VERSION,
+        backendReplicaId: replicaId,
+        initialization: {
+          status: bootstrap.status,
+          catalogState: catalog.products.length === 0 && catalog.categories.length === 0 ? "empty" : "data",
+          initializedAt: bootstrap.initializedAt,
+          registeredReplicaCount: bootstrap.registeredReplicaIds.length,
+        },
+        catalog,
+        stockStates: versionedRuntime.stockStates(),
+      })
+      return
+    }
+
+    if (method === "POST" && path === "/v1/bootstrap") {
+      requestChain = requestChain
+        .then(async () => {
+          const body = await readJson(request, bodyLimit)
+          if (!isRecord(body) || typeof body.replicaId !== "string" || body.replicaId.length === 0)
+            throw new HttpError(400, "invalid_bootstrap_request", "A browser replicaId is required")
+          const browserReplicaId = body.replicaId
+          if (!bootstrap.registeredReplicaIds.includes(browserReplicaId))
+            bootstrap.registeredReplicaIds.push(browserReplicaId)
+          if (body.requestedRights !== undefined && !isRecord(body.requestedRights))
+            throw new HttpError(400, "invalid_bootstrap_request", "requestedRights must be an object")
+          if (isRecord(body.requestedRights) && !bootstrap.allocations[browserReplicaId]) {
+            const granted: Record<string, number> = {}
+            for (const [productId, requested] of Object.entries(body.requestedRights)) {
+              if (typeof requested !== "number" || !Number.isSafeInteger(requested) || requested < 0)
+                throw new HttpError(400, "invalid_bootstrap_request", "requestedRights values must be non-negative integers")
+              const allocated = versionedRuntime.allocateRights(productId, browserReplicaId, requested)
+              granted[productId] = allocated
+            }
+            bootstrap.allocations[browserReplicaId] = granted
+          }
+          persistBootstrap()
+          const catalog = versionedRuntime.catalog()
+          json(response, 200, {
+            apiVersion: API_VERSION,
+            protocolVersion: PROTOCOL_VERSION,
+            backendReplicaId: replicaId,
+            initialization: {
+              status: bootstrap.status,
+              catalogState: catalog.products.length === 0 && catalog.categories.length === 0 ? "empty" : "data",
+              initializedAt: bootstrap.initializedAt,
+              registeredReplicaCount: bootstrap.registeredReplicaIds.length,
+            },
+            catalog,
+            stockStates: versionedRuntime.stockStates(),
+            allocation: bootstrap.allocations[browserReplicaId] ?? {},
+          })
+        })
+        .catch((error: unknown) => {
+          if (error instanceof HttpError) errorResponse(response, error.status, error.code, error.message)
+          else errorResponse(response, 400, "bootstrap_failed", "The backend bootstrap request failed")
+        })
       return
     }
 
@@ -316,6 +436,8 @@ export const createBackendServer = (
             options.versionedOperationStage?.("afterAppend", operation)
             persistRecovery({ schemaVersion: 1, status: "recovering", logPosition: result.position })
             versionedRuntime.apply(operation)
+            persistBootstrap()
+            persistBootstrap()
             options.versionedOperationStage?.("afterApply", operation)
             options.versionedOperationStage?.("beforeCheckpoint", operation)
             persistRecovery({ schemaVersion: 1, status: "complete", logPosition: result.position })

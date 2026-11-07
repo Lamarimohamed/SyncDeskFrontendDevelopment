@@ -111,7 +111,7 @@ export class MockRepository implements Repository {
     this.commit()
   }
 
-  hydrateCatalog = (catalog: RetailCatalog) =>
+  hydrateCatalog = (catalog: RetailCatalog, stockStates: Record<string, EscrowedStockState> = {}) =>
     this.write(() => {
       const pendingProductIds = new Set(
         this.engine.getSnapshot().pending
@@ -150,6 +150,10 @@ export class MockRepository implements Repository {
         if (pendingCategoryIds.has(category.id)) return category
         return catalog.categories.find((remote) => remote.id === category.id) ?? category
       })
+      for (const product of catalog.products) {
+        if (!pendingProductIds.has(product.id) && stockStates[product.id])
+          this.data.stocks[product.id] = structuredClone(stockStates[product.id])
+      }
     })
 
   /* ----- products ----- */
