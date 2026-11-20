@@ -4,11 +4,28 @@ SyncDesk contains a generic CRDT backend, a deterministic in-process simulator,
 and a process-level HTTP validation environment. The browser demo remains a
 local offline queue; it is not used as evidence for distributed convergence.
 
+## Running the full application locally
+
+Start the HTTP synchronization backend in one terminal:
+
+```bash
+BACKEND_STORE_PATH=.tmp/backend-replicas.json BACKEND_PORT=8787 npm run backend
+```
+
+Start the Vite frontend connected to the backend in a second terminal:
+
+```bash
+VITE_BACKEND_URL=http://127.0.0.1:8787 npm run dev
+```
+
+Open `http://localhost:8443` in your browser (use a second Incognito/Private window or a separate browser profile to test a second independent client replica).
+
 ## Local checks
 
 ```text
 npm test
 npm run typecheck
+npm run build
 ```
 
 ## Docker experiment
