@@ -61,7 +61,7 @@ export function SyncPendingPage() {
   }
 
   function removeControl(c: PendingChange) {
-    if (c.discardable) {
+    if (c.discardable || c.status === 'failed') {
       return (
         <Button size="sm" variant="ghost" icon={<Trash2 aria-hidden className="size-4" />} disabled={c.status === 'syncing'} onClick={() => setRemoveTarget(c)}>
           Remove

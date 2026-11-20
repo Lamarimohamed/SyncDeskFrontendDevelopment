@@ -648,25 +648,28 @@ describe('BackendApiClient', () => {
     const repoA = new MockRepository(engineA, storageA, seed, { latencyMs: 0, now: () => 1 })
 
     try {
-      // 1. First startup against a genuinely empty new server preserves local seeded data
+      // 1. First startup against a genuinely empty new server preserves local seeded data AND seeds the server
       await initializeBackendBootstrap(client, engineA, repoA)
       expect((await repoA.getProducts()).length).toBe(seed.products.length)
+      expect((await client.getRetailCatalog()).products.length).toBe(seed.products.length)
 
-      // 2. Server acquires catalog data with stock = 3
+      // 2. Test a second server that already has existing catalog data with stock = 3
+      const populatedBackend = await startBackendServer({ port: 0, replicaId: 'populated-hub' })
+      const populatedClient = new BackendApiClient(`http://127.0.0.1:${populatedBackend.port}`)
       const serverProduct = { ...seed.products[0], id: 'p-server-seeded', name: 'Server Coffee', stock: 3 }
-      await client.pushVersionedOperations([
+      await populatedClient.pushVersionedOperations([
         {
           schemaVersion: 2,
           operationId: 'server-seed-restore',
-          replicaId: 'bootstrap-hub',
-          version: { logicalTime: 1, replicaId: 'bootstrap-hub', operationId: 'server-seed-restore' },
+          replicaId: 'populated-hub',
+          version: { logicalTime: 1, replicaId: 'populated-hub', operationId: 'server-seed-restore' },
           kind: 'product.restore',
           productId: serverProduct.id,
           product: serverProduct,
         },
       ])
 
-      // 3. Browser B joins the existing installation, hydrates the server catalog, and receives stock rights
+      // 3. Browser B joins the existing populated installation, hydrates the server catalog, and receives stock rights
       const storageB = createMemoryStorage()
       const engineB = new SyncEngine({
         storage: storageB,
@@ -674,11 +677,11 @@ describe('BackendApiClient', () => {
         connectMs: 0,
         syncMs: 0,
         isAutoSyncEnabled: () => false,
-        backendClient: client,
+        backendClient: populatedClient,
       })
       const repoB = new MockRepository(engineB, storageB, seed, { latencyMs: 0, now: () => 1 })
       try {
-        await initializeBackendBootstrap(client, engineB, repoB)
+        await initializeBackendBootstrap(populatedClient, engineB, repoB)
         const productsB = await repoB.getProducts()
         expect(productsB.map((product) => product.id)).toEqual([serverProduct.id])
         expect(productsB[0].stock).toBe(3)
@@ -694,9 +697,10 @@ describe('BackendApiClient', () => {
         engineB.syncNow()
         await waitForIdle(engineB)
         expect(engineB.getSnapshot().latestStockOutcome).toMatchObject({ status: 'applied' })
-        expect((await client.getRetailCatalog()).products[0].stock).toBe(1)
+        expect((await populatedClient.getRetailCatalog()).products[0].stock).toBe(1)
       } finally {
         engineB.dispose()
+        await populatedBackend.close()
       }
     } finally {
       engineA.dispose()

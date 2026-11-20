@@ -165,6 +165,38 @@ export class MockRepository implements Repository {
     )
   }
 
+  getBootstrapSeedOperations = (): VersionedRetailOperation[] => {
+    const categoryOps: VersionedRetailOperation[] = this.data.categories.map((category) => {
+      const operationId = `seed-category-${category.id}`
+      return {
+        schemaVersion: 2,
+        operationId,
+        replicaId: this.engine.replicaId,
+        version: { logicalTime: 1, replicaId: this.engine.replicaId, operationId },
+        kind: 'category.patch',
+        categoryId: category.id,
+        changes: {
+          name: category.name,
+          nameAr: category.nameAr,
+          description: category.description,
+        },
+      }
+    })
+    const productOps: VersionedRetailOperation[] = this.data.products.map((product) => {
+      const operationId = `seed-product-${product.id}`
+      return {
+        schemaVersion: 2,
+        operationId,
+        replicaId: this.engine.replicaId,
+        version: { logicalTime: 1, replicaId: this.engine.replicaId, operationId },
+        kind: 'product.restore',
+        productId: product.id,
+        product: structuredClone(product),
+      }
+    })
+    return [...categoryOps, ...productOps]
+  }
+
   hydrateBootstrap = async (bootstrap: {
     catalog: RetailCatalog
     stockStates: Record<string, EscrowedStockState>
@@ -473,8 +505,9 @@ export class MockRepository implements Repository {
   discardPendingChange = (id: string) =>
     this.write(() => {
       const op = this.engine.getSnapshot().pending.find((p) => p.id === id)
-      if (!op || !op.discardable) throw new RepositoryError('This change cannot be removed without reverting it.')
-      if (op.field === 'price' && op.from) {
+      if (!op || (!op.discardable && op.status !== 'failed'))
+        throw new RepositoryError('This change cannot be removed without reverting it.')
+      if (op.discardable && op.field === 'price' && op.from) {
         const previous = Number(op.from.replace(/\D/g, ''))
         this.data.products = this.data.products.map((p) =>
           p.id === op.entityId ? { ...p, price: previous, updatedAt: this.now() } : p,

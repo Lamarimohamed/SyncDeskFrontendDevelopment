@@ -43,6 +43,19 @@ export const initializeBackendBootstrap = async (
 ): Promise<void> => {
   const initialRequested = targetRepository.getRequestedStockRights()
   let bootstrap = await client.registerReplica(targetEngine.replicaId, initialRequested)
+  const isUnseededNewServer =
+    bootstrap.initialization.catalogState === 'empty' &&
+    (bootstrap.initialization.logLength ?? 0) === 0
+  if (isUnseededNewServer) {
+    const seedOps = targetRepository.getBootstrapSeedOperations()
+    if (seedOps.length > 0) {
+      await client.pushVersionedOperations(seedOps)
+      bootstrap = await client.registerReplica(
+        targetEngine.replicaId,
+        targetRepository.getRequestedStockRights(),
+      )
+    }
+  }
   const missingRights = Object.fromEntries(
     bootstrap.catalog.products
       .filter((product) => product.stock > 0 && bootstrap.allocation?.[product.id] === undefined)
