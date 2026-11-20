@@ -68,6 +68,9 @@ export const initializeBackendBootstrap = async (
     })
   }
   await targetRepository.hydrateBootstrap(bootstrap)
+  if (targetEngine.getSnapshot().connectivity === 'offline') {
+    targetEngine.goOnline()
+  }
 }
 
 if (backendClient) {
