@@ -34,14 +34,37 @@ export const authService = new LocalAuthService({
   isOnline: () => engine.getSnapshot().connectivity !== 'offline',
 })
 
-engine.start()
 wireBrowserConnectivity(engine)
 
+export const initializeBackendBootstrap = async (
+  client: BackendApiClient,
+  targetEngine: SyncEngine,
+  targetRepository: MockRepository,
+): Promise<void> => {
+  const initialRequested = targetRepository.getRequestedStockRights()
+  let bootstrap = await client.registerReplica(targetEngine.replicaId, initialRequested)
+  const missingRights = Object.fromEntries(
+    bootstrap.catalog.products
+      .filter((product) => product.stock > 0 && bootstrap.allocation?.[product.id] === undefined)
+      .map((product) => [product.id, product.stock]),
+  )
+  if (Object.keys(missingRights).length > 0) {
+    bootstrap = await client.registerReplica(targetEngine.replicaId, {
+      ...initialRequested,
+      ...missingRights,
+    })
+  }
+  await targetRepository.hydrateBootstrap(bootstrap)
+}
+
 if (backendClient) {
-  void backendClient
-    .registerReplica(engine.replicaId)
-    .then((bootstrap) => mockRepository.hydrateCatalog(bootstrap.catalog, bootstrap.stockStates))
+  void initializeBackendBootstrap(backendClient, engine, mockRepository)
     .catch((error: unknown) => {
       logger.warn('REPOSITORY', 'Backend initialization unavailable', error instanceof Error ? error.message : 'The backend could not be initialized.')
     })
+    .finally(() => {
+      engine.start()
+    })
+} else {
+  engine.start()
 }

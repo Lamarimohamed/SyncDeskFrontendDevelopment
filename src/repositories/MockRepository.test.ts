@@ -130,4 +130,31 @@ describe('MockRepository products', () => {
     expect((await secondRepo.getProducts())[0].name).toBe('Persisted remote product')
     secondEngine.dispose()
   })
+
+  it('preserves local seed catalog when bootstrapping against a genuinely unseeded empty server', async () => {
+    h = createHarness()
+    const beforeCount = (await h.repo.getProducts()).length
+    expect(beforeCount).toBeGreaterThan(0)
+
+    await h.repo.hydrateBootstrap({
+      catalog: { products: [], categories: [] },
+      stockStates: {},
+      initialization: { catalogState: 'empty', logLength: 0 },
+    })
+
+    expect((await h.repo.getProducts()).length).toBe(beforeCount)
+    expect((await h.repo.getCategories()).length).toBeGreaterThan(0)
+  })
+
+  it('clears local catalog when bootstrapping against an initialized server whose catalog is intentionally empty after log operations', async () => {
+    h = createHarness()
+    await h.repo.hydrateBootstrap({
+      catalog: { products: [], categories: [] },
+      stockStates: {},
+      initialization: { catalogState: 'empty', logLength: 2 },
+    })
+
+    expect(await h.repo.getProducts()).toEqual([])
+    expect(await h.repo.getCategories()).toEqual([])
+  })
 })

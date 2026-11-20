@@ -314,6 +314,7 @@ export const createBackendServer = (
 
     if (method === "GET" && path === "/v1/bootstrap") {
       const catalog = versionedRuntime.catalog()
+      const logEntriesCount = log.all().length
       json(response, 200, {
         apiVersion: API_VERSION,
         protocolVersion: PROTOCOL_VERSION,
@@ -323,6 +324,7 @@ export const createBackendServer = (
           catalogState: catalog.products.length === 0 && catalog.categories.length === 0 ? "empty" : "data",
           initializedAt: bootstrap.initializedAt,
           registeredReplicaCount: bootstrap.registeredReplicaIds.length,
+          logLength: logEntriesCount,
         },
         catalog,
         stockStates: versionedRuntime.stockStates(),
@@ -341,18 +343,22 @@ export const createBackendServer = (
             bootstrap.registeredReplicaIds.push(browserReplicaId)
           if (body.requestedRights !== undefined && !isRecord(body.requestedRights))
             throw new HttpError(400, "invalid_bootstrap_request", "requestedRights must be an object")
-          if (isRecord(body.requestedRights) && !bootstrap.allocations[browserReplicaId]) {
-            const granted: Record<string, number> = {}
+          if (isRecord(body.requestedRights)) {
+            const granted: Record<string, number> = bootstrap.allocations[browserReplicaId] ?? {}
+            const knownProductIds = new Set(Object.keys(versionedRuntime.stockStates()))
             for (const [productId, requested] of Object.entries(body.requestedRights)) {
               if (typeof requested !== "number" || !Number.isSafeInteger(requested) || requested < 0)
                 throw new HttpError(400, "invalid_bootstrap_request", "requestedRights values must be non-negative integers")
-              const allocated = versionedRuntime.allocateRights(productId, browserReplicaId, requested)
-              granted[productId] = allocated
+              if (granted[productId] === undefined && knownProductIds.has(productId)) {
+                const allocated = versionedRuntime.allocateRights(productId, browserReplicaId, requested)
+                granted[productId] = allocated
+              }
             }
             bootstrap.allocations[browserReplicaId] = granted
           }
           persistBootstrap()
           const catalog = versionedRuntime.catalog()
+          const logEntriesCount = log.all().length
           json(response, 200, {
             apiVersion: API_VERSION,
             protocolVersion: PROTOCOL_VERSION,
@@ -362,6 +368,7 @@ export const createBackendServer = (
               catalogState: catalog.products.length === 0 && catalog.categories.length === 0 ? "empty" : "data",
               initializedAt: bootstrap.initializedAt,
               registeredReplicaCount: bootstrap.registeredReplicaIds.length,
+              logLength: logEntriesCount,
             },
             catalog,
             stockStates: versionedRuntime.stockStates(),

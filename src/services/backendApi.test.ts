@@ -629,4 +629,78 @@ describe('BackendApiClient', () => {
       engine.dispose()
     }
   })
+
+  it('bootstraps safely across unseeded server, populated server, and subsequent browser joins with stock rights', async () => {
+    const { initializeBackendBootstrap } = await import('./container')
+    const store = new ReplicaStore()
+    const backend = await startBackendServer({ port: 0, store, replicaId: 'bootstrap-hub' })
+    const client = new BackendApiClient(`http://127.0.0.1:${backend.port}`)
+    const seed = buildSeed(1)
+    const storageA = createMemoryStorage()
+    const engineA = new SyncEngine({
+      storage: storageA,
+      replicaId: 'browser-first',
+      connectMs: 0,
+      syncMs: 0,
+      isAutoSyncEnabled: () => false,
+      backendClient: client,
+    })
+    const repoA = new MockRepository(engineA, storageA, seed, { latencyMs: 0, now: () => 1 })
+
+    try {
+      // 1. First startup against a genuinely empty new server preserves local seeded data
+      await initializeBackendBootstrap(client, engineA, repoA)
+      expect((await repoA.getProducts()).length).toBe(seed.products.length)
+
+      // 2. Server acquires catalog data with stock = 3
+      const serverProduct = { ...seed.products[0], id: 'p-server-seeded', name: 'Server Coffee', stock: 3 }
+      await client.pushVersionedOperations([
+        {
+          schemaVersion: 2,
+          operationId: 'server-seed-restore',
+          replicaId: 'bootstrap-hub',
+          version: { logicalTime: 1, replicaId: 'bootstrap-hub', operationId: 'server-seed-restore' },
+          kind: 'product.restore',
+          productId: serverProduct.id,
+          product: serverProduct,
+        },
+      ])
+
+      // 3. Browser B joins the existing installation, hydrates the server catalog, and receives stock rights
+      const storageB = createMemoryStorage()
+      const engineB = new SyncEngine({
+        storage: storageB,
+        replicaId: 'browser-second',
+        connectMs: 0,
+        syncMs: 0,
+        isAutoSyncEnabled: () => false,
+        backendClient: client,
+      })
+      const repoB = new MockRepository(engineB, storageB, seed, { latencyMs: 0, now: () => 1 })
+      try {
+        await initializeBackendBootstrap(client, engineB, repoB)
+        const productsB = await repoB.getProducts()
+        expect(productsB.map((product) => product.id)).toEqual([serverProduct.id])
+        expect(productsB[0].stock).toBe(3)
+
+        // Browser B can now decrement stock using its allocated rights and sync to the server
+        await repoB.adjustStock({
+          productId: serverProduct.id,
+          type: 'remove',
+          quantity: 2,
+          reason: 'sale',
+          notes: 'Allocated offline sale',
+        })
+        engineB.syncNow()
+        await waitForIdle(engineB)
+        expect(engineB.getSnapshot().latestStockOutcome).toMatchObject({ status: 'applied' })
+        expect((await client.getRetailCatalog()).products[0].stock).toBe(1)
+      } finally {
+        engineB.dispose()
+      }
+    } finally {
+      engineA.dispose()
+      await backend.close()
+    }
+  })
 })

@@ -156,6 +156,29 @@ export class MockRepository implements Repository {
       }
     })
 
+  getRequestedStockRights = (remoteCatalog?: RetailCatalog): Record<string, number> => {
+    const products = remoteCatalog && remoteCatalog.products.length > 0 ? remoteCatalog.products : this.data.products
+    return Object.fromEntries(
+      products
+        .filter((product) => product.stock > 0)
+        .map((product) => [product.id, product.stock]),
+    )
+  }
+
+  hydrateBootstrap = async (bootstrap: {
+    catalog: RetailCatalog
+    stockStates: Record<string, EscrowedStockState>
+    initialization: { catalogState: 'empty' | 'data'; logLength?: number }
+  }): Promise<void> => {
+    const isUnseededNewServer =
+      bootstrap.initialization.catalogState === 'empty' &&
+      (bootstrap.initialization.logLength ?? 0) === 0
+    if (isUnseededNewServer) {
+      return
+    }
+    await this.hydrateCatalog(bootstrap.catalog, bootstrap.stockStates)
+  }
+
   /* ----- products ----- */
 
   getProducts = () => this.read(() => this.data.products.map((p) => this.toRecord(p)))

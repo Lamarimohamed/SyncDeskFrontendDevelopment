@@ -18,6 +18,7 @@ export interface BackendBootstrapResponse {
     catalogState: 'empty' | 'data'
     initializedAt: number
     registeredReplicaCount: number
+    logLength?: number
   }
   catalog: RetailCatalog
   stockStates: Record<string, EscrowedStockState>
