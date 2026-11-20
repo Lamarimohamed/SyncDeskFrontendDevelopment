@@ -55,7 +55,14 @@ export class VersionedRetailRuntime {
     const version = operation.version
     if (operation.kind === "product.patch") {
       const record = this.products.get(operation.productId)
-      if (record && !record.tombstone)
+      if (!record) {
+        this.products.set(operation.productId, {
+          fields: { ...(operation.changes as unknown as Product), id: operation.productId },
+          fieldVersions: Object.fromEntries(
+            Object.keys(operation.changes).map((field) => [field, version]),
+          ),
+        })
+      } else if (!record.tombstone || compareRetailVersions(version, record.tombstone) > 0) {
         for (const [field, value] of Object.entries(operation.changes) as Array<[keyof VersionedProductField, VersionedProductField[keyof VersionedProductField]]>) {
           const previous = record.fieldVersions[field]
           if ((!record.restoredVersion || compareRetailVersions(version, record.restoredVersion) > 0) &&
@@ -64,18 +71,27 @@ export class VersionedRetailRuntime {
             record.fieldVersions[field] = version
           }
         }
+      }
     } else if (operation.kind === "product.delete") {
       const record = this.products.get(operation.productId)
-      if (record && (!record.tombstone || compareRetailVersions(version, record.tombstone) > 0) && (!record.restoredVersion || compareRetailVersions(version, record.restoredVersion) > 0)) record.tombstone = version
+      if (!record) {
+        this.products.set(operation.productId, {
+          fields: { id: operation.productId } as Product,
+          fieldVersions: {},
+          tombstone: version,
+        })
+      } else if ((!record.tombstone || compareRetailVersions(version, record.tombstone) > 0) && (!record.restoredVersion || compareRetailVersions(version, record.restoredVersion) > 0)) {
+        record.tombstone = version
+      }
     } else if (operation.kind === "product.restore") {
       const record = this.products.get(operation.product.id)
-      if (!record || ((!record.tombstone || compareRetailVersions(version, record.tombstone) > 0) &&
-          (!record.restoredVersion || compareRetailVersions(version, record.restoredVersion) > 0))) {
+      const existingTombstone = record?.tombstone
+      if (!record || !record.restoredVersion || compareRetailVersions(version, record.restoredVersion) > 0) {
         let stock = this.stocks.get(operation.product.id)
         if (!stock) {
           stock = EscrowedStock.create(this.replicaId, operation.product.stock, `${operation.product.id}:restore`)
           this.stocks.set(operation.product.id, stock)
-        } else if (record?.tombstone && stock.value() < operation.product.stock) {
+        } else if (existingTombstone && compareRetailVersions(version, existingTombstone) > 0 && stock.value() < operation.product.stock) {
           const state = stock.stateSnapshot()
           const deficit = operation.product.stock - stock.value()
           for (let index = 0; index < deficit; index += 1) {
@@ -83,13 +99,44 @@ export class VersionedRetailRuntime {
           }
           stock = new EscrowedStock(this.replicaId, state)
           this.stocks.set(operation.product.id, stock)
+        } else if (!existingTombstone && Object.keys(stock.stateSnapshot().initialTokens).length === 0 && operation.product.stock > 0) {
+          const state = stock.stateSnapshot()
+          for (let index = 0; index < operation.product.stock; index += 1) {
+            state.initialTokens[`${operation.product.id}:restore:initial:${index}`] = this.replicaId
+          }
+          stock = new EscrowedStock(this.replicaId, state)
+          this.stocks.set(operation.product.id, stock)
         }
         const currentStock = stock.value()
+        const mergedFields: Product = { ...structuredClone(operation.product), stock: currentStock }
+        const mergedFieldVersions: Partial<Record<keyof VersionedProductField, VersionedRetailOperation["version"]>> = {}
+        const editableFields = [
+          "name",
+          "nameAr",
+          "description",
+          "descriptionAr",
+          "price",
+          "availability",
+          "lowStockThreshold",
+          "categoryId",
+        ] as const
+        for (const field of editableFields) {
+          const prevVersion = record?.fieldVersions[field]
+          if (prevVersion && compareRetailVersions(prevVersion, version) > 0 && (!existingTombstone || compareRetailVersions(prevVersion, existingTombstone) > 0)) {
+            ;(mergedFields as unknown as Record<string, unknown>)[field] = (record!.fields as unknown as Record<string, unknown>)[field]
+            mergedFieldVersions[field] = prevVersion
+          } else {
+            mergedFieldVersions[field] = version
+          }
+        }
+        const survivingTombstone =
+          existingTombstone && compareRetailVersions(existingTombstone, version) >= 0
+            ? existingTombstone
+            : undefined
         this.products.set(operation.product.id, {
-          fields: { ...structuredClone(operation.product), stock: currentStock },
-          fieldVersions: Object.fromEntries(
-            (Object.keys(operation.product) as Array<keyof VersionedProductField>).map((field) => [field, version]),
-          ),
+          fields: mergedFields,
+          fieldVersions: mergedFieldVersions,
+          tombstone: survivingTombstone,
           restoredVersion: version,
         })
       }
@@ -135,49 +182,53 @@ export class VersionedRetailRuntime {
         record.tombstone = version
       }
     } else if (operation.kind === "inventory.adjust") {
-      const stock = this.stocks.get(operation.productId)
-      if (stock) {
-        const tokenIds = operation.delta > 0
-          ? Array.from({ length: operation.delta }, (_, index) => `${operation.operationId}:${index}`)
-          : stock.snapshot().tokens
-              ? Object.entries(stock.snapshot().tokens)
-                  .filter(([, token]) => token.owner === operation.replicaId && !token.consumedBy)
-                  .slice(0, Math.abs(operation.delta))
-                  .map(([tokenId]) => tokenId)
-              : []
-        if (operation.delta > 0) {
-          this.stockOutcomes.set(operation.operationId, stock.apply({
-            operationId: operation.operationId,
-            productId: operation.productId,
-            replicaId: operation.replicaId,
-            version,
-            kind: "inventory.restock",
-            tokenIds,
-          }))
-        } else if (tokenIds.length === Math.abs(operation.delta)) {
-          this.stockOutcomes.set(operation.operationId, stock.apply({
-            operationId: operation.operationId,
-            productId: operation.productId,
-            replicaId: operation.replicaId,
-            version,
-            kind: "inventory.decrement",
-            tokenIds,
-          }))
-        } else {
-          this.stockOutcomes.set(operation.operationId, {
-            operationId: operation.operationId,
-            status: "no-effect",
-            reason: "Insufficient rights for decrement",
-          })
-        }
-        this.setStockValue(operation.productId, stock.value())
+      let stock = this.stocks.get(operation.productId)
+      if (!stock) {
+        stock = EscrowedStock.create(this.replicaId, 0, `${operation.productId}:restore`)
+        this.stocks.set(operation.productId, stock)
       }
+      const tokenIds = operation.delta > 0
+        ? Array.from({ length: operation.delta }, (_, index) => `${operation.operationId}:${index}`)
+        : stock.snapshot().tokens
+            ? Object.entries(stock.snapshot().tokens)
+                .filter(([, token]) => token.owner === operation.replicaId && !token.consumedBy)
+                .slice(0, Math.abs(operation.delta))
+                .map(([tokenId]) => tokenId)
+            : []
+      if (operation.delta > 0) {
+        this.stockOutcomes.set(operation.operationId, stock.apply({
+          operationId: operation.operationId,
+          productId: operation.productId,
+          replicaId: operation.replicaId,
+          version,
+          kind: "inventory.restock",
+          tokenIds,
+        }))
+      } else if (tokenIds.length === Math.abs(operation.delta)) {
+        this.stockOutcomes.set(operation.operationId, stock.apply({
+          operationId: operation.operationId,
+          productId: operation.productId,
+          replicaId: operation.replicaId,
+          version,
+          kind: "inventory.decrement",
+          tokenIds,
+        }))
+      } else {
+        this.stockOutcomes.set(operation.operationId, {
+          operationId: operation.operationId,
+          status: "no-effect",
+          reason: "Insufficient rights for decrement",
+        })
+      }
+      this.setStockValue(operation.productId, stock.value())
     } else {
-      const stock = this.stocks.get(operation.productId)
-      if (stock) {
-        this.stockOutcomes.set(operation.operationId, stock.apply(operation as StockOperation))
-        this.setStockValue(operation.productId, stock.value())
+      let stock = this.stocks.get(operation.productId)
+      if (!stock) {
+        stock = EscrowedStock.create(this.replicaId, 0, `${operation.productId}:restore`)
+        this.stocks.set(operation.productId, stock)
       }
+      this.stockOutcomes.set(operation.operationId, stock.apply(operation as StockOperation))
+      this.setStockValue(operation.productId, stock.value())
     }
     return "applied"
   }
@@ -202,7 +253,9 @@ export class VersionedRetailRuntime {
 
   catalog(): { products: Product[]; categories: Category[] } {
     return {
-      products: [...this.products.values()].filter((record) => !record.tombstone).map((record) => structuredClone(record.fields)),
+      products: [...this.products.values()]
+        .filter((record) => !record.tombstone && typeof record.fields.name === "string" && typeof record.fields.price === "number")
+        .map((record) => structuredClone(record.fields)),
       categories: [...this.categories.values()].filter((record) => !record.tombstone).map((record) => structuredClone(record.fields)),
     }
   }

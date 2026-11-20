@@ -598,26 +598,53 @@ export class MockRepository implements Repository {
     if (operation.kind === 'product.restore') {
       const currentRestore = metadata.productRestores[operation.productId]
       const currentVersion = metadata.productTombstones[operation.productId]
-      if ((!currentRestore || compareRetailVersions(operation.version, currentRestore) > 0) &&
-          (!currentVersion || compareRetailVersions(operation.version, currentVersion) > 0)) {
-        delete metadata.productTombstones[operation.productId]
+      if (!currentRestore || compareRetailVersions(operation.version, currentRestore) > 0) {
+        const isDeletedByNewerTombstone =
+          currentVersion && compareRetailVersions(currentVersion, operation.version) >= 0
+        if (!isDeletedByNewerTombstone) {
+          delete metadata.productTombstones[operation.productId]
+        }
         metadata.productRestores[operation.productId] = operation.version
-        metadata.productFields[operation.productId] = Object.fromEntries(
-          Object.keys(operation.product).map((field) => [field, operation.version]),
-        )
+        const existingVersions = metadata.productFields[operation.productId] ?? {}
+        const existingProduct = this.data.products.find((item) => item.id === operation.productId)
         if (!this.data.stocks[operation.productId]) {
           this.data.stocks[operation.productId] = EscrowedStock.create(
             this.engine.replicaId,
             operation.product.stock,
             `${operation.productId}:restore`,
           ).stateSnapshot()
+        } else if (Object.keys(this.data.stocks[operation.productId].initialTokens).length === 0 && operation.product.stock > 0) {
+          const state = structuredClone(this.data.stocks[operation.productId])
+          for (let index = 0; index < operation.product.stock; index += 1) {
+            state.initialTokens[`${operation.productId}:restore:initial:${index}`] = this.engine.replicaId
+          }
+          this.data.stocks[operation.productId] = state
         }
         const currentStock = new EscrowedStock(this.engine.replicaId, this.data.stocks[operation.productId]).value()
-        this.data.products = [
-          { ...operation.product, stock: currentStock },
-          ...this.data.products.filter((product) => product.id !== operation.productId),
-        ]
-        this.data.tombstones = this.data.tombstones.filter((id) => id !== operation.productId)
+        const mergedProduct: Product = { ...operation.product, stock: currentStock }
+        const mergedVersions: Record<string, RetailVersion> = {}
+        for (const field of Object.keys(operation.product)) {
+          const prevVersion = existingVersions[field]
+          if (
+            existingProduct &&
+            prevVersion &&
+            compareRetailVersions(prevVersion, operation.version) > 0 &&
+            (!currentVersion || compareRetailVersions(prevVersion, currentVersion) > 0)
+          ) {
+            ;(mergedProduct as unknown as Record<string, unknown>)[field] = (existingProduct as unknown as Record<string, unknown>)[field]
+            mergedVersions[field] = prevVersion
+          } else {
+            mergedVersions[field] = operation.version
+          }
+        }
+        metadata.productFields[operation.productId] = mergedVersions
+        if (!isDeletedByNewerTombstone) {
+          this.data.products = [
+            mergedProduct,
+            ...this.data.products.filter((product) => product.id !== operation.productId),
+          ]
+          this.data.tombstones = this.data.tombstones.filter((id) => id !== operation.productId)
+        }
       }
     } else if (operation.kind === 'product.delete') {
       const currentVersion = metadata.productTombstones[operation.productId]
