@@ -227,8 +227,11 @@ export class SyncEngine {
 
   removeChange(id: string): boolean {
     const target = this.snapshot.pending.find((p) => p.id === id)
-    if (!target || !target.discardable || target.status === 'syncing') return false
-    this.update({ pending: this.snapshot.pending.filter((p) => p.id !== id) })
+    if (!target || target.status === 'syncing' || (!target.discardable && target.status !== 'failed')) return false
+    this.update({
+      pending: this.snapshot.pending.filter((p) => p.id !== id),
+      phase: this.snapshot.pending.length === 1 && this.snapshot.phase === 'error' ? 'idle' : this.snapshot.phase,
+    })
     this.log('info', 'Pending change discarded', target.summary)
     return true
   }
@@ -505,6 +508,17 @@ export class SyncEngine {
         kind: 'category.patch',
         categoryId: operation.category.id,
         changes: { name: operation.category.name, nameAr: operation.category.nameAr, description: operation.category.description },
+      }
+    }
+    if (operation.kind === 'category.patch') {
+      return {
+        schemaVersion: 2,
+        operationId,
+        replicaId: this.replicaId,
+        version,
+        kind: 'category.patch',
+        categoryId: operation.categoryId,
+        changes: operation.changes,
       }
     }
     if (operation.kind === 'inventory.adjust') {

@@ -339,17 +339,25 @@ export class MockRepository implements Repository {
       if (!current) throw new NotFoundError('This category')
       const next: Category = { ...current, ...input, updatedAt: this.now() }
       this.data.categories = this.data.categories.map((c) => (c.id === id ? next : c))
-      this.enqueue({
-        kind: 'category.update',
-        entityType: 'category',
-        entityId: id,
-        entityLabel: next.name,
-        summary: 'Category updated',
-        field: 'details',
-        crdt: 'LWW Register',
-        discardable: false,
-        retailOperation: { operationId: nextId('retail'), kind: 'category.upsert', category: next },
-      })
+      const changedFields = (['name', 'nameAr', 'description'] as const).filter((k) => input[k] !== current[k])
+      if (changedFields.length > 0) {
+        this.enqueue({
+          kind: 'category.update',
+          entityType: 'category',
+          entityId: id,
+          entityLabel: next.name,
+          summary: 'Category updated',
+          field: 'details',
+          crdt: 'LWW Register',
+          discardable: false,
+          retailOperation: {
+            operationId: nextId('retail'),
+            kind: 'category.patch',
+            categoryId: id,
+            changes: Object.fromEntries(changedFields.map((field) => [field, input[field]])),
+          },
+        })
+      }
       return this.toCategoryRecord(next)
     })
 
@@ -397,10 +405,55 @@ export class MockRepository implements Repository {
       const delta = adjustmentDelta(input.type, input.quantity, product.stock)
       const adjustment = this.recordAdjustment(product, delta, input.type, input.reason, input.notes, product.stock + delta)
       this.data.products = this.data.products.map((p) =>
-        p.id === product.id ? { ...p, stock: p.stock + delta, updatedAt: this.now() } : p,
+        p.id === product.id ? { ...p, stock: adjustment.resultingStock, updatedAt: this.now() } : p,
       )
       return adjustment
     })
+
+  transferStockRights = (productId: string, toReplicaId: string, count: number, transferId = nextId('transfer')) =>
+    this.write(() => {
+      if (!toReplicaId || toReplicaId === this.engine.replicaId || !Number.isSafeInteger(count) || count <= 0)
+        throw new ValidationError('Invalid stock transfer parameters.', { quantity: 'Transfer count must be a positive integer to a distinct replica.' })
+      const product = this.data.products.find((p) => p.id === productId)
+      if (!product) throw new NotFoundError('This product')
+      const state = this.data.stocks[product.id] ??
+        EscrowedStock.create(this.engine.replicaId, product.stock, `${product.id}:${this.engine.replicaId}`).stateSnapshot()
+      const ledger = new EscrowedStock(this.engine.replicaId, state)
+      if (ledger.availableRights(this.engine.replicaId) < count)
+        throw new RepositoryError('This device has insufficient escrow rights available for this transfer.')
+      const tokenIds = Object.entries(ledger.snapshot().tokens)
+        .filter(([, token]) => token.owner === this.engine.replicaId && !token.consumedBy)
+        .slice(0, count)
+        .map(([tokenId]) => tokenId)
+      const operationId = nextId('retail')
+      this.enqueue({
+        kind: 'stock.adjust',
+        entityType: 'stock',
+        entityId: product.id,
+        entityLabel: product.name,
+        summary: `Stock transfer ${count} rights → ${toReplicaId}`,
+        field: 'stock',
+        crdt: 'PN-Counter',
+        discardable: false,
+        retailOperation: {
+          operationId,
+          kind: 'inventory.transfer',
+          productId: product.id,
+          transferId,
+          fromReplicaId: this.engine.replicaId,
+          toReplicaId,
+          tokenIds,
+        },
+      })
+      return tokenIds
+    })
+
+  getAvailableStockRights = (productId: string, replicaId = this.engine.replicaId): number => {
+    const product = this.data.products.find((p) => p.id === productId)
+    const state = this.data.stocks[productId]
+    if (!state) return product ? product.stock : 0
+    return new EscrowedStock(this.engine.replicaId, state).availableRights(replicaId)
+  }
 
   /* ----- synchronization & devices ----- */
 
@@ -482,6 +535,13 @@ export class MockRepository implements Repository {
         metadata.productFields[operation.productId] = Object.fromEntries(
           Object.keys(operation.product).map((field) => [field, operation.version]),
         )
+        if (!this.data.stocks[operation.productId]) {
+          this.data.stocks[operation.productId] = EscrowedStock.create(
+            this.engine.replicaId,
+            operation.product.stock,
+            `${operation.productId}:restore`,
+          ).stateSnapshot()
+        }
       }
       if (operation.kind === 'product.delete') metadata.productTombstones[operation.productId] = operation.version
       if (operation.kind === 'product.patch') {
@@ -498,6 +558,21 @@ export class MockRepository implements Repository {
         metadata.categoryFields[operation.categoryId] = versions
       }
       if (operation.kind === 'category.delete') metadata.categoryTombstones[operation.categoryId] = operation.version
+      if (
+        operation.kind === 'inventory.restock' ||
+        operation.kind === 'inventory.decrement' ||
+        operation.kind === 'inventory.transfer'
+      ) {
+        const product = this.data.products.find((item) => item.id === operation.productId)
+        const ledger = new EscrowedStock(
+          this.engine.replicaId,
+          this.data.stocks[operation.productId] ??
+            EscrowedStock.create(this.engine.replicaId, product?.stock ?? 0, `${operation.productId}:${this.engine.replicaId}`).stateSnapshot(),
+        )
+        ledger.apply(operation as StockOperation)
+        this.data.stocks[operation.productId] = ledger.stateSnapshot()
+        if (product) product.stock = ledger.value()
+      }
       this.commit()
       return true
     }
@@ -530,8 +605,16 @@ export class MockRepository implements Repository {
         metadata.productFields[operation.productId] = Object.fromEntries(
           Object.keys(operation.product).map((field) => [field, operation.version]),
         )
+        if (!this.data.stocks[operation.productId]) {
+          this.data.stocks[operation.productId] = EscrowedStock.create(
+            this.engine.replicaId,
+            operation.product.stock,
+            `${operation.productId}:restore`,
+          ).stateSnapshot()
+        }
+        const currentStock = new EscrowedStock(this.engine.replicaId, this.data.stocks[operation.productId]).value()
         this.data.products = [
-          operation.product,
+          { ...operation.product, stock: currentStock },
           ...this.data.products.filter((product) => product.id !== operation.productId),
         ]
         this.data.tombstones = this.data.tombstones.filter((id) => id !== operation.productId)
@@ -564,7 +647,7 @@ export class MockRepository implements Repository {
       const tombstone = metadata.categoryTombstones[operation.categoryId]
       const versions = metadata.categoryFields[operation.categoryId] ?? {}
       if (!category) {
-        for (const [field, value] of Object.entries(operation.changes)) {
+        for (const [field] of Object.entries(operation.changes)) {
           if (!versions[field] || compareRetailVersions(operation.version, versions[field]) > 0) {
             versions[field] = operation.version
           }
@@ -640,13 +723,19 @@ export class MockRepository implements Repository {
     const stockOperation: RetailOperation = delta >= 0
       ? { operationId, kind: 'inventory.restock', productId: product.id, tokenIds }
       : { operationId, kind: 'inventory.decrement', productId: product.id, tokenIds }
-    ledger.apply({
-      ...stockOperation,
-      replicaId: this.engine.replicaId,
-      version: { logicalTime: Date.now(), replicaId: this.engine.replicaId, operationId },
-    } as StockOperation)
-    this.data.stocks[product.id] = ledger.stateSnapshot()
-    resultingStock = ledger.value()
+    this.enqueue({
+      kind: 'stock.adjust',
+      entityType: 'stock',
+      entityId: product.id,
+      entityLabel: product.name,
+      summary: `Stock ${delta >= 0 ? '+' : '−'}${Math.abs(delta)} (${reason})`,
+      field: 'stock',
+      crdt: 'PN-Counter',
+      discardable: false,
+      retailOperation: stockOperation,
+    })
+    const updatedLedger = new EscrowedStock(this.engine.replicaId, this.data.stocks[product.id])
+    resultingStock = updatedLedger.value()
     const adjustment: StockAdjustment = {
       id: nextId('adj'),
       productId: product.id,
@@ -659,17 +748,6 @@ export class MockRepository implements Repository {
       deviceId: THIS_DEVICE_ID,
     }
     this.data.adjustments = [adjustment, ...this.data.adjustments]
-    this.enqueue({
-      kind: 'stock.adjust',
-      entityType: 'stock',
-      entityId: product.id,
-      entityLabel: product.name,
-      summary: `Stock ${delta >= 0 ? '+' : '−'}${Math.abs(delta)} (${reason})`,
-      field: 'stock',
-      crdt: 'PN-Counter',
-      discardable: false,
-      retailOperation: stockOperation,
-    })
     return adjustment
   }
 

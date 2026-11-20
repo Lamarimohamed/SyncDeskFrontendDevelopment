@@ -480,4 +480,449 @@ describe('multi-replica backend-mediated synchronization', () => {
       await backend.close()
     }
   })
+
+  it('preserves head-of-line blocked cursor across client restart while blocked, and advances after reference resolution', async () => {
+    const backend = await startBackendServer({ port: 0, replicaId: 'hol-server' })
+    const client = new BackendApiClient(`http://127.0.0.1:${backend.port}`)
+    const seed = buildSeed(1)
+    const storage = createMemoryStorage()
+    const engine1 = new SyncEngine({
+      storage,
+      replicaId: 'replica-hol',
+      deviceId: 'device-hol',
+      connectMs: 0,
+      syncMs: 0,
+      isAutoSyncEnabled: () => false,
+      backendClient: client,
+    })
+    new MockRepository(engine1, storage, seed, { latencyMs: 0, now: () => 1 })
+
+    try {
+      await client.pushVersionedOperations([
+        {
+          schemaVersion: 2,
+          operationId: 'hol-cat-create',
+          replicaId: 'server',
+          version: { logicalTime: 1, replicaId: 'server', operationId: 'hol-cat-create' },
+          kind: 'category.patch',
+          categoryId: 'c-drinks',
+          changes: { name: 'Drinks', nameAr: '', description: '' },
+        },
+        {
+          schemaVersion: 2,
+          operationId: 'hol-cat-delete',
+          replicaId: 'server',
+          version: { logicalTime: 2, replicaId: 'server', operationId: 'hol-cat-delete' },
+          kind: 'category.delete',
+          categoryId: 'c-drinks',
+        },
+        {
+          schemaVersion: 2,
+          operationId: 'hol-other-patch',
+          replicaId: 'server',
+          version: { logicalTime: 3, replicaId: 'server', operationId: 'hol-other-patch' },
+          kind: 'category.patch',
+          categoryId: 'c-bakery',
+          changes: { name: 'Bakery Updated', nameAr: '', description: 'After blocked delete' },
+        },
+      ])
+
+      // 1. First sync blocks at position 2 ('hol-cat-delete'); cursor stays at 1
+      engine1.syncNow()
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('expected sync error')), 1500)
+        const check = () => {
+          if (engine1.getSnapshot().phase === 'error') {
+            clearTimeout(timeout)
+            resolve()
+          }
+        }
+        engine1.subscribe(check)
+        check()
+      })
+      expect(JSON.parse(storage.getItem('syncdesk.sync.v1') ?? '{}').cursor).toBe(1)
+      engine1.dispose()
+
+      // 2. Restart client while operation 2 is still blocked
+      const engine2 = new SyncEngine({
+        storage,
+        replicaId: 'replica-hol',
+        deviceId: 'device-hol',
+        connectMs: 0,
+        syncMs: 0,
+        isAutoSyncEnabled: () => false,
+        backendClient: client,
+      })
+      const repo2 = new MockRepository(engine2, storage, seed, { latencyMs: 0, now: () => 1 })
+      try {
+        // Still blocked on retry before resolution
+        engine2.syncNow()
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('expected sync error after restart')), 1500)
+          const check = () => {
+            if (engine2.getSnapshot().phase === 'error') {
+              clearTimeout(timeout)
+              resolve()
+            }
+          }
+          engine2.subscribe(check)
+          check()
+        })
+        expect(JSON.parse(storage.getItem('syncdesk.sync.v1') ?? '{}').cursor).toBe(1)
+
+        // 3. Resolve local referencing products by reassigning them to 'c-bakery'
+        const drinkProducts = (await repo2.getProducts()).filter((p) => p.categoryId === 'c-drinks')
+        for (const prod of drinkProducts) {
+          await repo2.updateProduct(prod.id, { ...prod, categoryId: 'c-bakery' })
+        }
+        // Clear pending local queue so we isolate the pull recovery of positions 2 and 3
+        engine2.clearPending()
+
+        engine2.syncNow()
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('expected sync idle after resolution')), 1500)
+          const check = () => {
+            if (engine2.getSnapshot().phase === 'idle') {
+              clearTimeout(timeout)
+              resolve()
+            }
+          }
+          engine2.subscribe(check)
+          check()
+        })
+
+        const finalSync = JSON.parse(storage.getItem('syncdesk.sync.v1') ?? '{}')
+        expect(finalSync.cursor).toBe(3)
+        expect(finalSync.appliedOperationIds).toEqual(
+          expect.arrayContaining(['hol-cat-create', 'hol-cat-delete', 'hol-other-patch']),
+        )
+        expect((await repo2.getCategories()).some((cat) => cat.id === 'c-drinks')).toBe(false)
+        expect((await repo2.getCategories()).find((cat) => cat.id === 'c-bakery')?.name).toBe('Bakery Updated')
+      } finally {
+        engine2.dispose()
+      }
+    } finally {
+      engine1.dispose()
+      await backend.close()
+    }
+  })
+
+  it('converges three independent offline clients editing products and categories concurrently after reconnection', async () => {
+    const backend = await startBackendServer({ port: 0, replicaId: 'three-client-hub' })
+    const seed = buildSeed(1)
+
+    const createClientStack = (replicaId: string, deviceId: string) => {
+      const storage = createMemoryStorage()
+      const client = new BackendApiClient(`http://127.0.0.1:${backend.port}`)
+      const engine = new SyncEngine({
+        storage,
+        replicaId,
+        deviceId,
+        connectMs: 0,
+        syncMs: 0,
+        autoSyncDelayMs: 0,
+        isAutoSyncEnabled: () => false,
+        backendClient: client,
+      })
+      const repo = new MockRepository(engine, storage, seed, { latencyMs: 0, now: () => 1 })
+      return { storage, client, engine, repo }
+    }
+
+    const syncClient = async (engine: SyncEngine) => {
+      engine.syncNow()
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error(`sync timed out for ${engine.replicaId}`)), 1500)
+        const check = () => {
+          if (engine.getSnapshot().phase === 'idle' && engine.getSnapshot().pending.length === 0) {
+            clearTimeout(timeout)
+            resolve()
+          }
+        }
+        engine.subscribe(check)
+        check()
+      })
+    }
+
+    const clientA = createClientStack('client-a', 'dev-a')
+    const clientB = createClientStack('client-b', 'dev-b')
+    const clientC = createClientStack('client-c', 'dev-c')
+
+    try {
+      // All three clients go offline and perform concurrent mutations
+      clientA.engine.goOffline()
+      clientB.engine.goOffline()
+      clientC.engine.goOffline()
+
+      // Client A edits p-coffee name and c-drinks name
+      const coffeeA = await clientA.repo.getProduct('p-coffee')
+      await clientA.repo.updateProduct('p-coffee', { ...coffeeA, name: 'Arabica Roast' })
+      const drinksA = (await clientA.repo.getCategories()).find((c) => c.id === 'c-drinks')!
+      await clientA.repo.updateCategory('c-drinks', {
+        name: 'Artisan Drinks',
+        nameAr: drinksA.nameAr,
+        description: drinksA.description,
+      })
+
+      // Client B edits p-coffee price (different product field) and c-drinks description (different category field)
+      const coffeeB = await clientB.repo.getProduct('p-coffee')
+      await clientB.repo.updateProduct('p-coffee', { ...coffeeB, price: 240 })
+      const drinksB = (await clientB.repo.getCategories()).find((c) => c.id === 'c-drinks')!
+      await clientB.repo.updateCategory('c-drinks', {
+        name: drinksB.name,
+        nameAr: drinksB.nameAr,
+        description: 'Hot and cold specialty beverages',
+      })
+
+      // Client C edits p-coffee price (same-field conflict with B; C > B tie-break at equal logicalTime) and creates a new product
+      const coffeeC = await clientC.repo.getProduct('p-coffee')
+      await clientC.repo.updateProduct('p-coffee', { ...coffeeC, price: 260, lowStockThreshold: 4 })
+      const createdByC = await clientC.repo.createProduct({
+        name: 'Cardamom Tea',
+        nameAr: 'شاي بالهيل',
+        description: 'Spiced tea',
+        descriptionAr: '',
+        price: 150,
+        categoryId: 'c-drinks',
+        availability: 'available',
+        stock: 5,
+        lowStockThreshold: 2,
+      })
+
+      // Reconnect all three clients and synchronize two rounds so all pushes and pulls complete
+      clientA.engine.goOnline()
+      clientB.engine.goOnline()
+      clientC.engine.goOnline()
+      await syncClient(clientA.engine)
+      await syncClient(clientB.engine)
+      await syncClient(clientC.engine)
+      await syncClient(clientA.engine)
+      await syncClient(clientB.engine)
+      await syncClient(clientC.engine)
+
+      const productsA = (await clientA.repo.getProducts()).sort((x, y) => x.id.localeCompare(y.id))
+      const productsB = (await clientB.repo.getProducts()).sort((x, y) => x.id.localeCompare(y.id))
+      const productsC = (await clientC.repo.getProducts()).sort((x, y) => x.id.localeCompare(y.id))
+      expect(productsA).toEqual(productsB)
+      expect(productsB).toEqual(productsC)
+
+      const mergedCoffee = productsA.find((p) => p.id === 'p-coffee')!
+      expect(mergedCoffee).toMatchObject({
+        name: 'Arabica Roast',
+        price: 260,
+        lowStockThreshold: 4,
+      })
+      expect(productsA.some((p) => p.id === createdByC.id)).toBe(true)
+
+      const catsA = (await clientA.repo.getCategories()).sort((x, y) => x.id.localeCompare(y.id))
+      const catsB = (await clientB.repo.getCategories()).sort((x, y) => x.id.localeCompare(y.id))
+      const catsC = (await clientC.repo.getCategories()).sort((x, y) => x.id.localeCompare(y.id))
+      expect(catsA).toEqual(catsB)
+      expect(catsB).toEqual(catsC)
+      expect(catsA.find((c) => c.id === 'c-drinks')).toMatchObject({
+        name: 'Artisan Drinks',
+        description: 'Hot and cold specialty beverages',
+      })
+    } finally {
+      clientA.engine.dispose()
+      clientB.engine.dispose()
+      clientC.engine.dispose()
+      await backend.close()
+    }
+  })
+
+  it('converges stock allocation, peer transfer, and decrement across independent client stacks', async () => {
+    const { initializeBackendBootstrap } = await import('@/services/container')
+    const backend = await startBackendServer({ port: 0, replicaId: 'stock-hub' })
+    const seed = buildSeed(1)
+    const serverProduct = { ...seed.products[0], id: 'p-coffee', stock: 4 }
+    const seedClient = new BackendApiClient(`http://127.0.0.1:${backend.port}`)
+    await seedClient.pushVersionedOperations([
+      {
+        schemaVersion: 2,
+        operationId: 'seed-stock-product',
+        replicaId: 'stock-hub',
+        version: { logicalTime: 1, replicaId: 'stock-hub', operationId: 'seed-stock-product' },
+        kind: 'product.restore',
+        productId: serverProduct.id,
+        product: serverProduct,
+      },
+    ])
+
+    const storageA = createMemoryStorage()
+    const storageB = createMemoryStorage()
+    const clientA = new BackendApiClient(`http://127.0.0.1:${backend.port}`)
+    const clientB = new BackendApiClient(`http://127.0.0.1:${backend.port}`)
+    const engineA = new SyncEngine({
+      storage: storageA,
+      replicaId: 'client-stock-a',
+      deviceId: 'dev-stock-a',
+      connectMs: 0,
+      syncMs: 0,
+      isAutoSyncEnabled: () => false,
+      backendClient: clientA,
+    })
+    const engineB = new SyncEngine({
+      storage: storageB,
+      replicaId: 'client-stock-b',
+      deviceId: 'dev-stock-b',
+      connectMs: 0,
+      syncMs: 0,
+      isAutoSyncEnabled: () => false,
+      backendClient: clientB,
+    })
+    const repoA = new MockRepository(engineA, storageA, { ...seed, products: [serverProduct] }, { latencyMs: 0, now: () => 1 })
+    const repoB = new MockRepository(engineB, storageB, { ...seed, products: [serverProduct] }, { latencyMs: 0, now: () => 1 })
+
+    const syncClient = async (engine: SyncEngine) => {
+      engine.syncNow()
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error(`sync timed out for ${engine.replicaId}`)), 1500)
+        const check = () => {
+          if (engine.getSnapshot().phase === 'idle' && engine.getSnapshot().pending.length === 0) {
+            clearTimeout(timeout)
+            resolve()
+          }
+        }
+        engine.subscribe(check)
+        check()
+      })
+    }
+
+    try {
+      // Client A bootstraps first and is allocated all 4 stock rights; Client B bootstraps second and gets 0
+      await initializeBackendBootstrap(clientA, engineA, repoA)
+      await initializeBackendBootstrap(clientB, engineB, repoB)
+      expect(repoA.getAvailableStockRights('p-coffee', 'client-stock-a')).toBe(4)
+      expect(repoB.getAvailableStockRights('p-coffee', 'client-stock-b')).toBe(0)
+
+      // Client B cannot decrement before receiving transferred rights
+      await expect(
+        repoB.adjustStock({ productId: 'p-coffee', type: 'remove', quantity: 1, reason: 'sale', notes: '' }),
+      ).rejects.toThrow('no escrow rights')
+
+      // Client A decrements 1 unit and transfers 2 rights to Client B
+      await repoA.adjustStock({ productId: 'p-coffee', type: 'remove', quantity: 1, reason: 'sale', notes: 'A sale' })
+      await repoA.transferStockRights('p-coffee', 'client-stock-b', 2, 'tx-a-to-b')
+      expect(repoA.getAvailableStockRights('p-coffee', 'client-stock-a')).toBe(1)
+
+      await syncClient(engineA)
+      await syncClient(engineB)
+
+      // Client B now has 2 available rights and total stock is 3
+      expect((await repoB.getProduct('p-coffee')).stock).toBe(3)
+      expect(repoB.getAvailableStockRights('p-coffee', 'client-stock-b')).toBe(2)
+
+      // Client B decrements 2 units using its transferred rights and syncs back
+      await repoB.adjustStock({ productId: 'p-coffee', type: 'remove', quantity: 2, reason: 'sale', notes: 'B sale' })
+      await syncClient(engineB)
+      await syncClient(engineA)
+
+      expect((await repoA.getProduct('p-coffee')).stock).toBe(1)
+      expect((await repoB.getProduct('p-coffee')).stock).toBe(1)
+      expect(repoA.getAvailableStockRights('p-coffee', 'client-stock-a')).toBe(1)
+      expect(repoB.getAvailableStockRights('p-coffee', 'client-stock-b')).toBe(0)
+    } finally {
+      engineA.dispose()
+      engineB.dispose()
+      await backend.close()
+    }
+  })
+
+  it('converges when SyncEngine receives out-of-order and duplicate operation pages across client and server restarts', async () => {
+    const backend = await startBackendServer({ port: 0, replicaId: 'reorder-hub' })
+    const seed = buildSeed(1)
+    const baseClient = new BackendApiClient(`http://127.0.0.1:${backend.port}`)
+
+    // Push 3 operations to the server: create category, update category description, delete category
+    const opCreate: VersionedRetailOperation = {
+      schemaVersion: 2,
+      operationId: 'http-cat-create',
+      replicaId: 'origin-a',
+      version: { logicalTime: 1, replicaId: 'origin-a', operationId: 'http-cat-create' },
+      kind: 'category.patch',
+      categoryId: 'c-temp',
+      changes: { name: 'Temporary Category', nameAr: '', description: 'Initial' },
+    }
+    const opPatch: VersionedRetailOperation = {
+      schemaVersion: 2,
+      operationId: 'http-cat-patch',
+      replicaId: 'origin-b',
+      version: { logicalTime: 2, replicaId: 'origin-b', operationId: 'http-cat-patch' },
+      kind: 'category.patch',
+      categoryId: 'c-temp',
+      changes: { description: 'Updated before delete' },
+    }
+    const opDelete: VersionedRetailOperation = {
+      schemaVersion: 2,
+      operationId: 'http-cat-delete',
+      replicaId: 'origin-a',
+      version: { logicalTime: 3, replicaId: 'origin-a', operationId: 'http-cat-delete' },
+      kind: 'category.delete',
+      categoryId: 'c-temp',
+    }
+    await baseClient.pushVersionedOperations([opCreate, opPatch, opDelete])
+
+    // Client 1 pulls in normal order; Client 2 receives reordered + duplicated entries from pullVersionedOperations
+    const storage1 = createMemoryStorage()
+    const storage2 = createMemoryStorage()
+    const reorderedClient = new BackendApiClient(`http://127.0.0.1:${backend.port}`)
+    const originalPull = reorderedClient.pullVersionedOperations.bind(reorderedClient)
+    reorderedClient.pullVersionedOperations = async (after, limit) => {
+      const page = await originalPull(after, limit)
+      if (page.operations.length === 3) {
+        return {
+          ...page,
+          // Deliver create (v=1), then delete (v=3), then stale patch (v=2), plus duplicates
+          operations: [page.operations[0], page.operations[2], page.operations[1], page.operations[2], page.operations[1]],
+        }
+      }
+      return page
+    }
+
+    const engine1 = new SyncEngine({
+      storage: storage1,
+      replicaId: 'normal-order-client',
+      deviceId: 'dev-1',
+      connectMs: 0,
+      syncMs: 0,
+      isAutoSyncEnabled: () => false,
+      backendClient: baseClient,
+    })
+    const engine2 = new SyncEngine({
+      storage: storage2,
+      replicaId: 'reordered-client',
+      deviceId: 'dev-2',
+      connectMs: 0,
+      syncMs: 0,
+      isAutoSyncEnabled: () => false,
+      backendClient: reorderedClient,
+    })
+    const repo1 = new MockRepository(engine1, storage1, seed, { latencyMs: 0, now: () => 1 })
+    const repo2 = new MockRepository(engine2, storage2, seed, { latencyMs: 0, now: () => 1 })
+
+    try {
+      for (const eng of [engine1, engine2]) {
+        eng.syncNow()
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('pull sync timed out')), 1500)
+          const check = () => {
+            if (eng.getSnapshot().phase === 'idle') {
+              clearTimeout(timeout)
+              resolve()
+            }
+          }
+          eng.subscribe(check)
+          check()
+        })
+      }
+
+      expect((await repo1.getCategories()).some((c) => c.id === 'c-temp')).toBe(false)
+      expect((await repo2.getCategories()).some((c) => c.id === 'c-temp')).toBe(false)
+      expect(await repo1.getCategories()).toEqual(await repo2.getCategories())
+    } finally {
+      engine1.dispose()
+      engine2.dispose()
+      await backend.close()
+    }
+  })
 })

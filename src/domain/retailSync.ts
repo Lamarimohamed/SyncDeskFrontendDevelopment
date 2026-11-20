@@ -400,6 +400,12 @@ export type RetailOperation =
     }
   | {
       operationId: string
+      kind: 'category.patch'
+      categoryId: string
+      changes: Partial<VersionedCategoryField>
+    }
+  | {
+      operationId: string
       kind: 'category.delete'
       categoryId: string
     }
