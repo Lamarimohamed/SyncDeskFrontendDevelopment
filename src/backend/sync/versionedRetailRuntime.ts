@@ -104,18 +104,36 @@ export class VersionedRetailRuntime {
             description: operation.changes.description ?? "",
             updatedAt: version.logicalTime,
           },
-          fieldVersions: Object.fromEntries(Object.keys(operation.changes).map((field) => [field, version])),
+          fieldVersions: Object.fromEntries(
+            Object.keys(operation.changes).map((field) => [field, version]),
+          ),
         })
-      } else if (record && (!record.tombstone || compareRetailVersions(version, record.tombstone) > 0)) for (const [field, value] of Object.entries(operation.changes) as Array<[keyof Category, string]>) {
-        const previous = record.fieldVersions[field]
-        if (!previous || compareRetailVersions(version, previous) > 0) {
-          record.fields = { ...record.fields, [field]: value }
-          record.fieldVersions[field] = version
+      } else if (record) {
+        if (record.tombstone && typeof operation.changes.name === "string" && compareRetailVersions(version, record.tombstone) > 0) {
+          record.tombstone = undefined
+        }
+        for (const [field, value] of Object.entries(operation.changes) as Array<[keyof Category, string]>) {
+          const previous = record.fieldVersions[field]
+          if (!previous || compareRetailVersions(version, previous) > 0) {
+            record.fields = { ...record.fields, [field]: value }
+            record.fieldVersions[field] = version
+          }
+        }
+        const latestNameVersion = record.fieldVersions.name
+        if (latestNameVersion) {
+          record.fields = { ...record.fields, updatedAt: latestNameVersion.logicalTime }
         }
       }
     } else if (operation.kind === "category.delete") {
       const record = this.categories.get(operation.categoryId)
-      if (record && (!record.tombstone || compareRetailVersions(version, record.tombstone) > 0)) record.tombstone = version
+      const latestNameVersion = record?.fieldVersions.name
+      if (
+        record &&
+        (!record.tombstone || compareRetailVersions(version, record.tombstone) > 0) &&
+        (!latestNameVersion || compareRetailVersions(version, latestNameVersion) > 0)
+      ) {
+        record.tombstone = version
+      }
     } else if (operation.kind === "inventory.adjust") {
       const stock = this.stocks.get(operation.productId)
       if (stock) {

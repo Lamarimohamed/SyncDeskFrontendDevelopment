@@ -33,7 +33,7 @@ export interface SyncEngineOptions {
   seedActivity?: ActivityEvent[]
   seedLastSyncAt?: number | null
   backendClient?: BackendApiClient
-  onVersionedOperation?: (operation: VersionedRetailOperation, source: 'local' | 'remote') => void
+  onVersionedOperation?: (operation: VersionedRetailOperation, source: 'local' | 'remote') => void | boolean
 }
 
 type MergeHandler = (change: RemoteChange) => void
@@ -138,7 +138,7 @@ export class SyncEngine {
     this.mergeHandler = handler
   }
 
-  setVersionedOperationHandler(handler: (operation: VersionedRetailOperation, source: 'local' | 'remote') => void): void {
+  setVersionedOperationHandler(handler: (operation: VersionedRetailOperation, source: 'local' | 'remote') => void | boolean): void {
     this.opts.onVersionedOperation = handler
   }
 
@@ -457,12 +457,25 @@ export class SyncEngine {
     if (!this.opts.backendClient) return
     let page = await this.opts.backendClient.pullVersionedOperations(this.cursor)
     while (true) {
+      let lastAppliedPosition = this.cursor
       for (const entry of page.operations) {
         this.logicalTime = Math.max(this.logicalTime, entry.operation.version.logicalTime)
         if (!this.appliedOperationIds.has(entry.operation.operationId)) {
-          this.opts.onVersionedOperation?.(entry.operation, 'remote')
+          try {
+            const result = this.opts.onVersionedOperation?.(entry.operation, 'remote')
+            if (result === false) {
+              this.cursor = lastAppliedPosition
+              this.commit()
+              throw new Error(`Deferred remote operation ${entry.operation.operationId} at position ${entry.position}`)
+            }
+          } catch (error) {
+            this.cursor = lastAppliedPosition
+            this.commit()
+            throw error
+          }
           this.appliedOperationIds.add(entry.operation.operationId)
         }
+        lastAppliedPosition = entry.position
       }
       this.cursor = page.nextCursor
       this.commit()

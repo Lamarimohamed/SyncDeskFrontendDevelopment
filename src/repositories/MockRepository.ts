@@ -287,7 +287,8 @@ export class MockRepository implements Repository {
 
   restoreProduct = (product: Product) =>
     this.write(() => {
-      this.data.products = [{ ...product, updatedAt: this.now() }, ...this.data.products]
+      const restored: Product = { ...product, updatedAt: this.now() }
+      this.data.products = [restored, ...this.data.products]
       this.data.tombstones = this.data.tombstones.filter((t) => t !== product.id)
       const queuedDelete = this.engine
         .getSnapshot()
@@ -298,15 +299,15 @@ export class MockRepository implements Repository {
         this.enqueue({
           kind: 'product.create',
           entityType: 'product',
-          entityId: product.id,
-          entityLabel: product.name,
+          entityId: restored.id,
+          entityLabel: restored.name,
           summary: 'Product restored',
           crdt: 'OR-Set',
           discardable: false,
-          retailOperation: { operationId: nextId('retail'), kind: 'product.upsert', product },
+          retailOperation: { operationId: nextId('retail'), kind: 'product.upsert', product: restored },
         })
       }
-      return this.toRecord(product)
+      return this.toRecord(restored)
     })
 
   /* ----- categories ----- */
@@ -464,12 +465,19 @@ export class MockRepository implements Repository {
     this.engine.enqueue(draft)
   }
 
-  private applyVersionedOperation(operation: VersionedRetailOperation, source: 'local' | 'remote'): void {
+  private applyVersionedOperation(operation: VersionedRetailOperation, source: 'local' | 'remote'): boolean {
     const metadata = this.data.versioned!
-    if (metadata.applied.includes(operation.operationId)) return
+    if (metadata.applied.includes(operation.operationId)) return true
+    if (source === 'remote' && operation.kind === 'category.delete') {
+      const hasActiveProducts = this.data.products.some((product) => product.categoryId === operation.categoryId)
+      if (hasActiveProducts) {
+        throw new RepositoryError(`Cannot apply remote category.delete for ${operation.categoryId}: category is still referenced by local products.`)
+      }
+    }
     metadata.applied.push(operation.operationId)
     if (source === 'local') {
       if (operation.kind === 'product.restore') {
+        delete metadata.productTombstones[operation.productId]
         metadata.productRestores[operation.productId] = operation.version
         metadata.productFields[operation.productId] = Object.fromEntries(
           Object.keys(operation.product).map((field) => [field, operation.version]),
@@ -482,13 +490,16 @@ export class MockRepository implements Repository {
         metadata.productFields[operation.productId] = versions
       }
       if (operation.kind === 'category.patch') {
+        if (typeof operation.changes.name === 'string') {
+          delete metadata.categoryTombstones[operation.categoryId]
+        }
         const versions = metadata.categoryFields[operation.categoryId] ?? {}
         for (const field of Object.keys(operation.changes)) versions[field] = operation.version
         metadata.categoryFields[operation.categoryId] = versions
       }
       if (operation.kind === 'category.delete') metadata.categoryTombstones[operation.categoryId] = operation.version
       this.commit()
-      return
+      return true
     }
     if (
       operation.kind === 'inventory.restock' ||
@@ -507,19 +518,23 @@ export class MockRepository implements Repository {
         product.stock = ledger.value()
       }
       this.commit()
-      return
+      return true
     }
     if (operation.kind === 'product.restore') {
       const currentRestore = metadata.productRestores[operation.productId]
       const currentVersion = metadata.productTombstones[operation.productId]
       if ((!currentRestore || compareRetailVersions(operation.version, currentRestore) > 0) &&
           (!currentVersion || compareRetailVersions(operation.version, currentVersion) > 0)) {
+        delete metadata.productTombstones[operation.productId]
+        metadata.productRestores[operation.productId] = operation.version
+        metadata.productFields[operation.productId] = Object.fromEntries(
+          Object.keys(operation.product).map((field) => [field, operation.version]),
+        )
         this.data.products = [
           operation.product,
           ...this.data.products.filter((product) => product.id !== operation.productId),
         ]
         this.data.tombstones = this.data.tombstones.filter((id) => id !== operation.productId)
-        metadata.productRestores[operation.productId] = operation.version
       }
     } else if (operation.kind === 'product.delete') {
       const currentVersion = metadata.productTombstones[operation.productId]
@@ -546,38 +561,53 @@ export class MockRepository implements Repository {
       }
     } else if (operation.kind === 'category.patch') {
       const category = this.data.categories.find((item) => item.id === operation.categoryId)
-      if (!category && typeof operation.changes.name === 'string') {
-        this.data.categories.push({
-          id: operation.categoryId,
-          name: operation.changes.name,
-          nameAr: operation.changes.nameAr ?? '',
-          description: operation.changes.description ?? '',
-          updatedAt: operation.version.logicalTime,
-        })
-      } else if (category && (!metadata.categoryTombstones[operation.categoryId] || compareRetailVersions(operation.version, metadata.categoryTombstones[operation.categoryId]) > 0)) {
-        const versions = metadata.categoryFields[operation.categoryId] ?? {}
+      const tombstone = metadata.categoryTombstones[operation.categoryId]
+      const versions = metadata.categoryFields[operation.categoryId] ?? {}
+      if (!category) {
+        for (const [field, value] of Object.entries(operation.changes)) {
+          if (!versions[field] || compareRetailVersions(operation.version, versions[field]) > 0) {
+            versions[field] = operation.version
+          }
+        }
+        metadata.categoryFields[operation.categoryId] = versions
+        if (typeof operation.changes.name === 'string' && (!tombstone || compareRetailVersions(operation.version, tombstone) > 0)) {
+          delete metadata.categoryTombstones[operation.categoryId]
+          this.data.categories.push({
+            id: operation.categoryId,
+            name: operation.changes.name,
+            nameAr: operation.changes.nameAr ?? '',
+            description: operation.changes.description ?? '',
+            updatedAt: operation.version.logicalTime,
+          })
+        }
+      } else {
         for (const [field, value] of Object.entries(operation.changes)) {
           if (!versions[field] || compareRetailVersions(operation.version, versions[field]) > 0) {
             ;(category as unknown as Record<string, unknown>)[field] = value
             versions[field] = operation.version
           }
         }
+        if (versions.name) {
+          category.updatedAt = versions.name.logicalTime
+        }
         metadata.categoryFields[operation.categoryId] = versions
       }
     } else if (operation.kind === 'category.delete') {
-      const category = this.data.categories.find((item) => item.id === operation.categoryId)
-      if (!category || this.data.products.some((product) => product.categoryId === operation.categoryId))
-        return
       const currentVersion = metadata.categoryTombstones[operation.categoryId]
-      if (!currentVersion || compareRetailVersions(operation.version, currentVersion) > 0) {
+      const latestNameVersion = metadata.categoryFields[operation.categoryId]?.name
+      if (
+        (!currentVersion || compareRetailVersions(operation.version, currentVersion) > 0) &&
+        (!latestNameVersion || compareRetailVersions(operation.version, latestNameVersion) > 0)
+      ) {
         metadata.categoryTombstones[operation.categoryId] = operation.version
-        this.data.categories = this.data.categories.filter((category) => category.id !== operation.categoryId)
+        this.data.categories = this.data.categories.filter((item) => item.id !== operation.categoryId)
       }
     } else {
       const product = this.data.products.find((item) => item.id === operation.productId)
       if (product) product.stock = Math.max(0, product.stock + operation.delta)
     }
     this.commit()
+    return true
   }
 
   private applyRemote(change: RemoteChange): void {

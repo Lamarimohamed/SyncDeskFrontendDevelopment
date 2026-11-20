@@ -38,7 +38,7 @@ const operation = (changes: Record<string, unknown> = {}): Record<string, unknow
 })
 
 describe('versioned retail operation primitives', () => {
-  it('validates category deletion as a distinct operation', () => {
+  it('validates category deletion as a distinct operation and rejects malformed category.delete payloads', () => {
     expect(() =>
       validateVersionedRetailOperation({
         schemaVersion: 2,
@@ -49,6 +49,17 @@ describe('versioned retail operation primitives', () => {
         categoryId: 'c1',
       }),
     ).not.toThrow()
+    expect(() =>
+      validateVersionedRetailOperation({
+        schemaVersion: 2,
+        operationId: 'category-delete-extra',
+        replicaId: 'replica-a',
+        version: version('category-delete-extra', 'replica-a', 1),
+        kind: 'category.delete',
+        categoryId: 'c1',
+        extra: true,
+      }),
+    ).toThrow('category.delete contains unknown fields')
   })
 
   it('rejects malformed category operations', () => {

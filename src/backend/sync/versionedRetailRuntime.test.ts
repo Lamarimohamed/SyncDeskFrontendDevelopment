@@ -266,4 +266,48 @@ describe('VersionedRetailRuntime field-level semantics', () => {
     expect(replayed.snapshot()).toEqual(uninterrupted.snapshot())
     expect(replayed.catalog()).toEqual(uninterrupted.catalog())
   })
+
+  it('converges category delete and category patch across both delivery orders, duplicate delivery, and restart replay', () => {
+    const createCat = categoryPatch('cat-create', 'replica-a', 1, { name: 'Bakery', description: 'Fresh bread' })
+    const staleDescPatch = categoryPatch('cat-stale-desc', 'replica-b', 2, { description: 'Pastries' })
+    const deleteCat: VersionedRetailOperation = {
+      schemaVersion: 2,
+      operationId: 'cat-delete',
+      replicaId: 'replica-a',
+      version: { logicalTime: 3, replicaId: 'replica-a', operationId: 'cat-delete' },
+      kind: 'category.delete',
+      categoryId: 'c-drinks',
+    }
+
+    // 1. Delete (v=3) vs stale/concurrent description patch (v=2): A then B vs B then A
+    const orderAB = new VersionedRetailRuntime()
+    orderAB.apply(createCat)
+    orderAB.apply(staleDescPatch)
+    orderAB.apply(deleteCat)
+    orderAB.apply(deleteCat) // duplicate
+
+    const orderBA = new VersionedRetailRuntime()
+    orderBA.apply(createCat)
+    orderBA.apply(deleteCat)
+    orderBA.apply(staleDescPatch)
+    orderBA.apply(staleDescPatch) // duplicate
+
+    expect(orderAB.catalog().categories).toEqual([])
+    expect(orderBA.catalog().categories).toEqual([])
+
+    // 2. Newer category creation/restore patch with name (v=4) after delete (v=3): A then B vs B then A
+    const recreateCat = categoryPatch('cat-recreate', 'replica-b', 4, { name: 'Artisan Bakery', description: 'Sourdough' })
+    const postRecreatePatch = categoryPatch('cat-post-patch', 'replica-a', 5, { description: 'Sourdough & viennoiserie' })
+
+    const restoreAB = new VersionedRetailRuntime()
+    for (const op of [createCat, deleteCat, recreateCat, postRecreatePatch]) restoreAB.apply(op)
+
+    const restoreBA = new VersionedRetailRuntime()
+    for (const op of [createCat, recreateCat, deleteCat, postRecreatePatch]) restoreBA.apply(op)
+
+    expect(restoreAB.catalog()).toEqual(restoreBA.catalog())
+    expect(restoreAB.catalog().categories).toEqual([
+      expect.objectContaining({ id: 'c-drinks', name: 'Artisan Bakery', description: 'Sourdough & viennoiserie' }),
+    ])
+  })
 })
