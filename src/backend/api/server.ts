@@ -438,7 +438,6 @@ export const createBackendServer = (
             persistRecovery({ schemaVersion: 1, status: "recovering", logPosition: result.position })
             versionedRuntime.apply(operation)
             persistBootstrap()
-            persistBootstrap()
             options.versionedOperationStage?.("afterApply", operation)
             options.versionedOperationStage?.("beforeCheckpoint", operation)
             persistRecovery({ schemaVersion: 1, status: "complete", logPosition: result.position })

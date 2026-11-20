@@ -197,8 +197,12 @@ export class EscrowedStock {
   }
 
   private recompute(): StockSnapshot {
+    const allocations = this.state.allocations ?? {}
     const tokens: Record<string, StockToken> = Object.fromEntries(
-      Object.entries(this.state.initialTokens).map(([tokenId, owner]) => [tokenId, { owner }]),
+      Object.entries(this.state.initialTokens).map(([tokenId, owner]) => [
+        tokenId,
+        { owner: allocations[tokenId] ?? owner },
+      ]),
     )
     const incrementComponents: Record<string, number> = {}
     const decrementComponents: Record<string, number> = {}
@@ -211,12 +215,9 @@ export class EscrowedStock {
         let accepted = 0
         for (const tokenId of operation.tokenIds) {
           if (!tokens[tokenId]) {
-            tokens[tokenId] = { owner: operation.replicaId }
+            tokens[tokenId] = { owner: allocations[tokenId] ?? operation.replicaId }
             accepted += 1
           }
-        }
-        for (const [tokenId, owner] of Object.entries(this.state.allocations ?? {})) {
-          if (tokens[tokenId] && !tokens[tokenId].consumedBy) tokens[tokenId].owner = owner
         }
         incrementComponents[operation.replicaId] = (incrementComponents[operation.replicaId] ?? 0) + accepted
       } else if (operation.kind === 'inventory.transfer') {

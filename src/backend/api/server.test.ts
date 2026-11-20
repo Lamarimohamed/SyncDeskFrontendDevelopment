@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest"
 import { createStateMessage } from "../sync/protocol"
 import { ReplicaRuntime } from "../crdt/replica"
 import { FileReplicaStore, ReplicaStore } from "../persistence/ReplicaStore"
+import { EscrowedStock, type EscrowedStockState } from "../../domain/stock"
 import {
   createBackendServer,
   createFileBackedStore,
@@ -90,7 +91,7 @@ describe("backend HTTP API", () => {
     }
   })
 
-  it("allocates canonical stock rights once and does not duplicate them on registration retry", async () => {
+  it("allocates canonical stock rights once, preserves them across server restart, and enforces ownership on decrement", async () => {
     const store = new ReplicaStore()
     const backend = await startBackendServer({ port: 0, store, replicaId: "allocation-server" })
     const product = {
@@ -128,12 +129,71 @@ describe("backend HTTP API", () => {
       expect(first.body).toMatchObject({ allocation: { [product.id]: 2 } })
       expect(retry.body).toMatchObject({ allocation: { [product.id]: 2 } })
       const states = (retry.body as {
-        stockStates: Record<string, { allocations?: Record<string, string> }>
+        stockStates: Record<string, EscrowedStockState>
       }).stockStates
-      const owners = Object.values(states[product.id].allocations ?? {})
-      expect(owners.filter((owner) => owner === "browser-a")).toHaveLength(2)
+      const ledgerBeforeRestart = new EscrowedStock("browser-a", states[product.id])
+      expect(ledgerBeforeRestart.availableRights("browser-a")).toBe(2)
+      expect(ledgerBeforeRestart.availableRights("allocation-server")).toBe(1)
     } finally {
       await backend.close()
+    }
+
+    // Restart server against the same store and verify allocated rights survive log replay
+    const restarted = await startBackendServer({ port: 0, store, replicaId: "allocation-server" })
+    try {
+      const afterBootstrap = await httpRequest(restarted.port, "GET", "/v1/bootstrap")
+      const stockState = (afterBootstrap.body as { stockStates: Record<string, EscrowedStockState> }).stockStates[product.id]
+      const ledger = new EscrowedStock("browser-a", stockState)
+      expect(ledger.availableRights("browser-a")).toBe(2)
+      expect(ledger.availableRights("allocation-server")).toBe(1)
+
+      const browserTokens = Object.entries(ledger.snapshot().tokens)
+        .filter(([, token]) => token.owner === "browser-a" && !token.consumedBy)
+        .map(([tokenId]) => tokenId)
+      expect(browserTokens).toHaveLength(2)
+
+      // Authorized decrement by browser-a succeeds
+      const decOp = {
+        schemaVersion: 2,
+        operationId: "browser-a-dec-1",
+        replicaId: "browser-a",
+        version: { logicalTime: 2, replicaId: "browser-a", operationId: "browser-a-dec-1" },
+        kind: "inventory.decrement",
+        productId: product.id,
+        tokenIds: [browserTokens[0]],
+      }
+      const decRes = await httpRequest(restarted.port, "POST", "/v1/sync/operations", { operations: [decOp] })
+      expect(decRes.body).toMatchObject({
+        results: [{ operationId: "browser-a-dec-1", status: "accepted", stockOutcome: { status: "applied" } }],
+      })
+
+      // Retry does not double consume
+      const retryRes = await httpRequest(restarted.port, "POST", "/v1/sync/operations", { operations: [decOp] })
+      expect(retryRes.body).toMatchObject({
+        results: [{ operationId: "browser-a-dec-1", status: "duplicate", stockOutcome: { status: "applied" } }],
+      })
+
+      // Unauthorized decrement by browser-b using browser-a's remaining token has no effect
+      const unauthOp = {
+        schemaVersion: 2,
+        operationId: "browser-b-unauth",
+        replicaId: "browser-b",
+        version: { logicalTime: 3, replicaId: "browser-b", operationId: "browser-b-unauth" },
+        kind: "inventory.decrement",
+        productId: product.id,
+        tokenIds: [browserTokens[1]],
+      }
+      const unauthRes = await httpRequest(restarted.port, "POST", "/v1/sync/operations", { operations: [unauthOp] })
+      expect(unauthRes.body).toMatchObject({
+        results: [{ operationId: "browser-b-unauth", status: "accepted", stockOutcome: { status: "no-effect" } }],
+      })
+
+      const catalogRes = await httpRequest(restarted.port, "GET", "/v1/sync/catalog")
+      expect(catalogRes.body).toMatchObject({
+        catalog: { products: [{ id: product.id, stock: 2 }] },
+      })
+    } finally {
+      await restarted.close()
     }
   })
 

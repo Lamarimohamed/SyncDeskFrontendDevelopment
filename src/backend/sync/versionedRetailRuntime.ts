@@ -32,14 +32,18 @@ export class VersionedRetailRuntime {
     stockStates: Record<string, EscrowedStockState> = {},
   ) {
     this.replicaId = replicaId
+    for (const [productId, state] of Object.entries(stockStates)) {
+      this.stocks.set(productId, new EscrowedStock(replicaId, state))
+    }
     for (const product of initial.products) {
       this.products.set(product.id, { fields: structuredClone(product), fieldVersions: {} })
-      this.stocks.set(
-        product.id,
-        stockStates[product.id]
-          ? new EscrowedStock(replicaId, stockStates[product.id])
-          : EscrowedStock.create(replicaId, product.stock, `${product.id}:${replicaId}`),
-      )
+      if (!this.stocks.has(product.id)) {
+        this.stocks.set(
+          product.id,
+          EscrowedStock.create(replicaId, product.stock, `${product.id}:${replicaId}`),
+        )
+      }
+      this.setStockValue(product.id, this.stocks.get(product.id)!.value())
     }
     for (const category of initial.categories) this.categories.set(category.id, { fields: structuredClone(category), fieldVersions: {} })
   }
@@ -67,15 +71,27 @@ export class VersionedRetailRuntime {
       const record = this.products.get(operation.product.id)
       if (!record || ((!record.tombstone || compareRetailVersions(version, record.tombstone) > 0) &&
           (!record.restoredVersion || compareRetailVersions(version, record.restoredVersion) > 0))) {
+        let stock = this.stocks.get(operation.product.id)
+        if (!stock) {
+          stock = EscrowedStock.create(this.replicaId, operation.product.stock, `${operation.product.id}:restore`)
+          this.stocks.set(operation.product.id, stock)
+        } else if (record?.tombstone && stock.value() < operation.product.stock) {
+          const state = stock.stateSnapshot()
+          const deficit = operation.product.stock - stock.value()
+          for (let index = 0; index < deficit; index += 1) {
+            state.initialTokens[`${operation.product.id}:restore:${operation.operationId}:${index}`] = this.replicaId
+          }
+          stock = new EscrowedStock(this.replicaId, state)
+          this.stocks.set(operation.product.id, stock)
+        }
+        const currentStock = stock.value()
         this.products.set(operation.product.id, {
-          fields: structuredClone(operation.product),
+          fields: { ...structuredClone(operation.product), stock: currentStock },
           fieldVersions: Object.fromEntries(
             (Object.keys(operation.product) as Array<keyof VersionedProductField>).map((field) => [field, version]),
           ),
           restoredVersion: version,
         })
-        if (!this.stocks.has(operation.product.id))
-          this.stocks.set(operation.product.id, EscrowedStock.create(this.replicaId, operation.product.stock, `${operation.product.id}:restore`))
       }
     } else if (operation.kind === "category.patch") {
       const record = this.categories.get(operation.categoryId)
