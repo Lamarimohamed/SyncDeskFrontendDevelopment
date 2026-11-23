@@ -20,6 +20,36 @@ VITE_BACKEND_URL=http://127.0.0.1:8787 npm run dev
 
 Open `http://localhost:8443` in your browser (use a second Incognito/Private window or a separate browser profile to test a second independent client replica).
 
+## Running the containerized application with Docker Compose
+
+Copy `.env.example` to `.env` if you wish to customize host ports or settings, then build and start the `backend` and `frontend` containers:
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+- **Frontend UI:** `http://localhost:8443` (proxies `/api/*` internally to `http://backend:8787`)
+- **Frontend Health:** `http://localhost:8443/healthz`
+- **Backend Health:** `http://localhost:8787/health` (and proxied at `http://localhost:8443/api/health`)
+
+Common container lifecycle commands (see [docs/M9_DOCKER_DEPLOYMENT.md](./docs/M9_DOCKER_DEPLOYMENT.md) for full details):
+
+```bash
+# View container status and logs
+docker compose ps
+docker compose logs -f
+
+# Restart backend while preserving persistent volume data
+docker compose restart backend
+
+# Stop containers while preserving persistent volume data
+docker compose down
+
+# Full reset (stop containers and delete persistent named volumes)
+docker compose down -v
+```
+
 ## Local checks
 
 ```text
@@ -28,7 +58,7 @@ npm run typecheck
 npm run build
 ```
 
-## Docker experiment
+## Docker experiment (`--profile experiment`)
 
 Docker and Docker Compose are required. The command starts three independent
 backend processes, gives each process its own persistent volume, runs a
@@ -36,14 +66,14 @@ partition/reconnect workload, and writes machine-readable results to a Docker
 volume:
 
 ```text
-docker compose up --build --abort-on-container-exit experiment-runner
-docker compose down
+docker compose --profile experiment up --build --abort-on-container-exit experiment-runner
+docker compose --profile experiment down
 ```
 
 To reset all persisted replica state, including experiment output:
 
 ```text
-docker compose down --volumes
+docker compose --profile experiment down --volumes
 ```
 
 For the full build, health, restart, network disconnect/reconnect, experiment,
