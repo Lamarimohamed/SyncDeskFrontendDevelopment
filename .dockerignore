@@ -3,3 +3,8 @@ dist
 .git
 .tmp
 *.log
+.env
+.env.*
+!.env.example
+coverage
+.cursor

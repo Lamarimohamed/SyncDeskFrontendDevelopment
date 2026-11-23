@@ -1,15 +1,73 @@
 services:
-  replica-a:
+  backend:
     build:
       context: .
       dockerfile: Dockerfile
+      target: backend
+    init: true
+    stop_grace_period: 10s
+    restart: unless-stopped
+    environment:
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8787
+      BACKEND_REPLICA_ID: ${BACKEND_REPLICA_ID:-backend-primary}
+      BACKEND_STORE_PATH: ${BACKEND_STORE_PATH:-/var/lib/syncdesk/replica.json}
+      BACKEND_CORS_ORIGIN: ${BACKEND_CORS_ORIGIN:-*}
+      BACKEND_MAX_BODY_BYTES: ${BACKEND_MAX_BODY_BYTES:-262144}
+    ports:
+      - "${BACKEND_HOST_PORT:-8787}:8787"
+    volumes:
+      - syncdesk-backend-data:/var/lib/syncdesk
+    networks: [syncdesk]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 12
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+      args:
+        VITE_BACKEND_URL: ${VITE_BACKEND_URL:-/api}
+        VITE_DEMO_MODE: ${VITE_DEMO_MODE:-true}
+    init: true
+    stop_grace_period: 10s
+    restart: unless-stopped
+    environment:
+      FRONTEND_HOST: 0.0.0.0
+      FRONTEND_PORT: 8443
+      BACKEND_UPSTREAM_URL: ${BACKEND_UPSTREAM_URL:-http://backend:8787}
+    ports:
+      - "${FRONTEND_HOST_PORT:-8443}:8443"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [syncdesk]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8443/healthz').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 12
+
+  replica-a:
+    profiles: ["experiment"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    init: true
+    stop_grace_period: 10s
     environment:
       BACKEND_HOST: 0.0.0.0
       BACKEND_PORT: 8787
       BACKEND_REPLICA_ID: replica-a
       BACKEND_STORE_PATH: /var/lib/syncdesk/replica.json
       BACKEND_CORS_ORIGIN: "*"
-    command: ["pnpm", "backend"]
     volumes:
       - replica-a-data:/var/lib/syncdesk
     networks: [syncdesk]
@@ -20,16 +78,19 @@ services:
       retries: 20
 
   replica-b:
+    profiles: ["experiment"]
     build:
       context: .
       dockerfile: Dockerfile
+      target: backend
+    init: true
+    stop_grace_period: 10s
     environment:
       BACKEND_HOST: 0.0.0.0
       BACKEND_PORT: 8787
       BACKEND_REPLICA_ID: replica-b
       BACKEND_STORE_PATH: /var/lib/syncdesk/replica.json
       BACKEND_CORS_ORIGIN: "*"
-    command: ["pnpm", "backend"]
     volumes:
       - replica-b-data:/var/lib/syncdesk
     networks: [syncdesk]
@@ -40,16 +101,19 @@ services:
       retries: 20
 
   replica-c:
+    profiles: ["experiment"]
     build:
       context: .
       dockerfile: Dockerfile
+      target: backend
+    init: true
+    stop_grace_period: 10s
     environment:
       BACKEND_HOST: 0.0.0.0
       BACKEND_PORT: 8787
       BACKEND_REPLICA_ID: replica-c
       BACKEND_STORE_PATH: /var/lib/syncdesk/replica.json
       BACKEND_CORS_ORIGIN: "*"
-    command: ["pnpm", "backend"]
     volumes:
       - replica-c-data:/var/lib/syncdesk
     networks: [syncdesk]
@@ -60,9 +124,12 @@ services:
       retries: 20
 
   experiment-runner:
+    profiles: ["experiment"]
     build:
       context: .
       dockerfile: Dockerfile
+      target: backend
+    init: true
     environment:
       REPLICA_URLS: http://replica-a:8787,http://replica-b:8787,http://replica-c:8787
       EXPERIMENT_OUTPUT: /results/distributed-experiment.json
@@ -83,6 +150,7 @@ networks:
     driver: bridge
 
 volumes:
+  syncdesk-backend-data:
   replica-a-data:
   replica-b-data:
   replica-c-data:
